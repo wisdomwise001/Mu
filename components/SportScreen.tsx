@@ -7,6 +7,7 @@ import {
   RefreshControl,
   StyleSheet,
   Platform,
+  TouchableOpacity,
 } from "react-native";
 import { useQuery } from "@tanstack/react-query";
 import { format } from "date-fns";

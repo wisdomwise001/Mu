@@ -12,6 +12,7 @@ import {
 } from "@expo-google-fonts/inter";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { queryClient } from "@/lib/query-client";
+import Colors from "@/constants/colors";
 
 SplashScreen.preventAutoHideAsync();
 
