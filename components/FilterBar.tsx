@@ -51,9 +51,11 @@ const styles = StyleSheet.create({
   container: {
     flexDirection: "row",
     paddingHorizontal: 12,
-    paddingVertical: 8,
-    gap: 6,
+    paddingVertical: 12,
+    gap: 8,
     backgroundColor: Colors.dark.surface,
+    borderBottomWidth: 1,
+    borderBottomColor: Colors.dark.border,
   },
   filterButton: {
     flexDirection: "row",

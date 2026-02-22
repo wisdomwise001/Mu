@@ -119,8 +119,6 @@ const styles = StyleSheet.create({
   container: {
     backgroundColor: Colors.dark.surface,
     paddingVertical: 8,
-    borderBottomWidth: 1,
-    borderBottomColor: Colors.dark.border,
   },
   listContent: {
     paddingHorizontal: 8,

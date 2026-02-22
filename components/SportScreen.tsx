@@ -81,7 +81,17 @@ export default function SportScreen({ sport, title }: SportScreenProps) {
   return (
     <View style={[styles.container, { paddingTop: webTopPadding }]}>
       <View style={[styles.headerBar, Platform.OS !== "web" && { paddingTop: insets.top }]}>
-        <Text style={styles.headerTitle}>{title}</Text>
+        <View style={styles.headerTop}>
+          <Text style={styles.headerTitle}>{title}</Text>
+          {Platform.OS === "web" && (
+            <TouchableOpacity
+              onPress={() => window.location.reload()}
+              style={styles.refreshButton}
+            >
+              <Ionicons name="refresh" size={20} color={Colors.dark.textSecondary} />
+            </TouchableOpacity>
+          )}
+        </View>
         <Text style={styles.headerDate}>{format(selectedDate, "EEEE, MMMM d")}</Text>
       </View>
 
@@ -151,8 +161,18 @@ const styles = StyleSheet.create({
   },
   headerBar: {
     paddingHorizontal: 16,
-    paddingBottom: 8,
+    paddingBottom: 12,
     backgroundColor: Colors.dark.surface,
+    borderBottomWidth: 1,
+    borderBottomColor: Colors.dark.border,
+  },
+  headerTop: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+  refreshButton: {
+    padding: 4,
   },
   headerTitle: {
     fontSize: 22,
