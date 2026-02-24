@@ -77,7 +77,7 @@ export default function SportScreen({ sport, title }: SportScreenProps) {
     [],
   );
 
-  const webTopPadding = Platform.OS === "web" ? 67 : 0;
+  const webTopPadding = Platform.OS === "web" ? 115 : 0;
 
   return (
     <View style={[styles.container, { paddingTop: webTopPadding }]}>
