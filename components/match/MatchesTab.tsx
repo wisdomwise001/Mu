@@ -1,13 +1,15 @@
-import React, { memo } from "react";
+import React, { memo, useCallback } from "react";
 import {
   View,
   Text,
   StyleSheet,
   ActivityIndicator,
   ScrollView,
+  TouchableOpacity,
 } from "react-native";
 import { Image } from "expo-image";
 import { useQuery } from "@tanstack/react-query";
+import { useRouter } from "expo-router";
 import Colors from "@/constants/colors";
 import { getTeamImageUrl } from "@/lib/api";
 
@@ -31,6 +33,7 @@ interface MatchesTabProps {
 }
 
 function MatchesTab({ homeTeamId, awayTeamId, homeTeamName, awayTeamName }: MatchesTabProps) {
+  const router = useRouter();
   const { data: homeData, isLoading: homeLoading } = useQuery<{ events: MatchEvent[] }>({
     queryKey: ["/api/team", homeTeamId.toString(), "events", "last", "0"],
   });
@@ -38,6 +41,23 @@ function MatchesTab({ homeTeamId, awayTeamId, homeTeamName, awayTeamName }: Matc
   const { data: awayData, isLoading: awayLoading } = useQuery<{ events: MatchEvent[] }>({
     queryKey: ["/api/team", awayTeamId.toString(), "events", "last", "0"],
   });
+
+  const handleMatchPress = useCallback((match: MatchEvent) => {
+    router.push({
+      pathname: `/match/${match.id}`,
+      params: {
+        homeTeamName: match.homeTeam.shortName || match.homeTeam.name,
+        awayTeamName: match.awayTeam.shortName || match.awayTeam.name,
+        homeTeamId: match.homeTeam.id.toString(),
+        awayTeamId: match.awayTeam.id.toString(),
+        homeScore: (match.homeScore?.display ?? match.homeScore?.current ?? 0).toString(),
+        awayScore: (match.awayScore?.display ?? match.awayScore?.current ?? 0).toString(),
+        statusType: match.status.type,
+        startTimestamp: match.startTimestamp.toString(),
+        tournamentName: match.tournament?.uniqueTournament?.name || match.tournament?.name || "",
+      },
+    });
+  }, [router]);
 
   if (homeLoading || awayLoading) {
     return (
@@ -63,7 +83,12 @@ function MatchesTab({ homeTeamId, awayTeamId, homeTeamName, awayTeamName }: Matc
           <Text style={styles.sectionTitle}>{homeTeamName}</Text>
         </View>
         {homeMatches.map((match) => (
-          <PastMatchRow key={match.id} match={match} teamId={homeTeamId} />
+          <PastMatchRow 
+            key={match.id} 
+            match={match} 
+            teamId={homeTeamId} 
+            onPress={() => handleMatchPress(match)}
+          />
         ))}
       </View>
 
@@ -78,7 +103,12 @@ function MatchesTab({ homeTeamId, awayTeamId, homeTeamName, awayTeamName }: Matc
           <Text style={styles.sectionTitle}>{awayTeamName}</Text>
         </View>
         {awayMatches.map((match) => (
-          <PastMatchRow key={match.id} match={match} teamId={awayTeamId} />
+          <PastMatchRow 
+            key={match.id} 
+            match={match} 
+            teamId={awayTeamId} 
+            onPress={() => handleMatchPress(match)}
+          />
         ))}
       </View>
 
@@ -87,7 +117,15 @@ function MatchesTab({ homeTeamId, awayTeamId, homeTeamName, awayTeamName }: Matc
   );
 }
 
-const PastMatchRow = memo(({ match, teamId }: { match: MatchEvent; teamId: number }) => {
+const PastMatchRow = memo(({ 
+  match, 
+  teamId, 
+  onPress 
+}: { 
+  match: MatchEvent; 
+  teamId: number;
+  onPress: () => void;
+}) => {
   const isHome = match.homeTeam.id === teamId;
   const homeScore = match.homeScore?.display ?? match.homeScore?.current ?? 0;
   const awayScore = match.awayScore?.display ?? match.awayScore?.current ?? 0;
@@ -108,7 +146,7 @@ const PastMatchRow = memo(({ match, teamId }: { match: MatchEvent; teamId: numbe
     result === "W" ? Colors.dark.win : result === "L" ? Colors.dark.live : Colors.dark.textSecondary;
 
   return (
-    <View style={styles.matchRow}>
+    <TouchableOpacity style={styles.matchRow} onPress={onPress} activeOpacity={0.7}>
       <View style={[styles.resultBadge, { backgroundColor: resultColor }]}>
         <Text style={styles.resultText}>{result}</Text>
       </View>
@@ -134,7 +172,7 @@ const PastMatchRow = memo(({ match, teamId }: { match: MatchEvent; teamId: numbe
         </Text>
         <Text style={styles.dateText}>{dateStr}</Text>
       </View>
-    </View>
+    </TouchableOpacity>
   );
 });
 
