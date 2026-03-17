@@ -32,8 +32,19 @@ interface BestBet {
   reasoning: string;
 }
 
+interface TMPData {
+  total: number;
+  boxA: number;
+  boxB: number;
+  boxC: number;
+  boxD: number;
+  momentum: "High" | "Medium" | "Low";
+  oddsAvailable: boolean;
+}
+
 interface AIAnalysis {
   summary: string;
+  tmpInterpretation?: string;
   homeTeamAnalysis: TeamAnalysis;
   awayTeamAnalysis: TeamAnalysis;
   predictions: Prediction[];

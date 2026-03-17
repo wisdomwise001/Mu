@@ -222,7 +222,39 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(400).json({ error: "homeTeamId and awayTeamId are required" });
       }
 
-      // Fetch all data in parallel
+      // ── Helpers ─────────────────────────────────────────────────────────────
+
+      function parseFractionalOdds(value?: string): number | null {
+        if (!value) return null;
+        const parts = value.split("/");
+        if (parts.length === 2) {
+          const n = parseFloat(parts[0]), d = parseFloat(parts[1]);
+          if (!isNaN(n) && !isNaN(d) && d !== 0) return Math.round((n / d + 1) * 100) / 100;
+        }
+        const dec = parseFloat(value);
+        return isNaN(dec) ? null : dec;
+      }
+
+      function extractFTOdds(oddsData: any): { home: number | null; draw: number | null; away: number | null } {
+        const empty = { home: null, draw: null, away: null };
+        if (!oddsData?.markets) return empty;
+        const ftMarket =
+          oddsData.markets.find((m: any) =>
+            (m.marketName || "").toLowerCase().includes("full time")
+          ) || oddsData.markets[0];
+        if (!ftMarket?.choices) return empty;
+        const choices = ftMarket.choices as any[];
+        const find = (names: string[]) =>
+          choices.find((c) => names.includes((c.name || "").toLowerCase()));
+        return {
+          home: parseFractionalOdds(find(["1", "home"])?.fractionalValue),
+          draw: parseFractionalOdds(find(["x", "draw"])?.fractionalValue),
+          away: parseFractionalOdds(find(["2", "away"])?.fractionalValue),
+        };
+      }
+
+      // ── Fetch base data ──────────────────────────────────────────────────────
+
       const [homeEventsData, awayEventsData, eventOddsData, eventData] = await Promise.allSettled([
         fetchSofaScore(`/team/${homeTeamId}/events/last/0`),
         fetchSofaScore(`/team/${awayTeamId}/events/last/0`),
@@ -230,37 +262,79 @@ export async function registerRoutes(app: Express): Promise<Server> {
         eventId ? fetchSofaScore(`/event/${eventId}`) : Promise.resolve(null),
       ]);
 
-      const homeEvents = homeEventsData.status === "fulfilled" ? (homeEventsData.value as any)?.events || [] : [];
-      const awayEvents = awayEventsData.status === "fulfilled" ? (awayEventsData.value as any)?.events || [] : [];
-      const oddsData = eventOddsData.status === "fulfilled" ? eventOddsData.value : null;
+      const homeEvents: any[] = homeEventsData.status === "fulfilled" ? (homeEventsData.value as any)?.events || [] : [];
+      const awayEvents: any[] = awayEventsData.status === "fulfilled" ? (awayEventsData.value as any)?.events || [] : [];
+      const currentMatchOddsRaw = eventOddsData.status === "fulfilled" ? eventOddsData.value : null;
       const currentEvent = eventData.status === "fulfilled" ? (eventData.value as any)?.event : null;
 
       const last15Home = homeEvents.slice(0, 15);
       const last15Away = awayEvents.slice(0, 15);
 
+      // ── Fetch odds for every historical match (for TMP B & D pillars) ────────
+
+      const allPastEventIds = Array.from(
+        new Set([...last15Home, ...last15Away].map((m: any) => m.id as number))
+      );
+
+      const pastOddsResults = await Promise.allSettled(
+        allPastEventIds.map((id) => fetchSofaScore(`/event/${id}/odds/1/all`))
+      );
+
+      const pastOddsMap = new Map<number, { home: number | null; draw: number | null; away: number | null }>();
+      allPastEventIds.forEach((id, idx) => {
+        const result = pastOddsResults[idx];
+        pastOddsMap.set(id, result.status === "fulfilled" ? extractFTOdds(result.value) : { home: null, draw: null, away: null });
+      });
+
+      // ── Summarise each match ─────────────────────────────────────────────────
+
       function summarizeMatch(match: any, teamId: number) {
         const isHome = match.homeTeam?.id === Number(teamId);
-        const teamScore = isHome ? match.homeScore?.display ?? match.homeScore?.current ?? 0 : match.awayScore?.display ?? match.awayScore?.current ?? 0;
-        const oppScore = isHome ? match.awayScore?.display ?? match.awayScore?.current ?? 0 : match.homeScore?.display ?? match.homeScore?.current ?? 0;
-        const opponent = isHome ? match.awayTeam?.name || match.awayTeam?.shortName : match.homeTeam?.name || match.homeTeam?.shortName;
-        let result = "D";
+        const teamScore = isHome
+          ? match.homeScore?.display ?? match.homeScore?.current ?? 0
+          : match.awayScore?.display ?? match.awayScore?.current ?? 0;
+        const oppScore = isHome
+          ? match.awayScore?.display ?? match.awayScore?.current ?? 0
+          : match.homeScore?.display ?? match.homeScore?.current ?? 0;
+        const teamHtGoals = isHome
+          ? match.homeScore?.period1 ?? null
+          : match.awayScore?.period1 ?? null;
+        const oppHtGoals = isHome
+          ? match.awayScore?.period1 ?? null
+          : match.homeScore?.period1 ?? null;
+        const htResult: "winning" | "losing" | "level" =
+          teamHtGoals === null || oppHtGoals === null
+            ? "level"
+            : teamHtGoals > oppHtGoals
+            ? "winning"
+            : teamHtGoals < oppHtGoals
+            ? "losing"
+            : "level";
+
+        const opponent = isHome
+          ? match.awayTeam?.name || match.awayTeam?.shortName
+          : match.homeTeam?.name || match.homeTeam?.shortName;
+        let result: "W" | "D" | "L" = "D";
         if (match.winnerCode === 1) result = isHome ? "W" : "L";
         else if (match.winnerCode === 2) result = isHome ? "L" : "W";
+
         const date = new Date(match.startTimestamp * 1000).toISOString().split("T")[0];
         const competition = match.tournament?.uniqueTournament?.name || match.tournament?.name || "Unknown";
         const totalGoals = teamScore + oppScore;
-        const cleanSheet = oppScore === 0;
-        const scored = teamScore > 0;
+
         return {
+          eventId: match.id as number,
           date,
           result,
           score: `${teamScore}-${oppScore}`,
+          htResult,
           side: isHome ? "Home" : "Away",
+          isHome,
           opponent,
           competition,
           totalGoals,
-          cleanSheet,
-          scored,
+          cleanSheet: oppScore === 0,
+          scored: teamScore > 0,
           goalsScored: teamScore,
           goalsConceded: oppScore,
         };
@@ -269,117 +343,210 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const homeSummaries = last15Home.map((m: any) => summarizeMatch(m, Number(homeTeamId)));
       const awaySummaries = last15Away.map((m: any) => summarizeMatch(m, Number(awayTeamId)));
 
-      // Extract key stats
+      // ── TMP Calculation ──────────────────────────────────────────────────────
+      // TMP = Box A (result) + Box B (odds performance) + Box C (match control) + Box D (opponent strength)
+
+      function calculateTMP(summaries: ReturnType<typeof summarizeMatch>[]) {
+        let boxA = 0, boxB = 0, boxC = 0, boxD = 0;
+        const breakdown: string[] = [];
+
+        for (const s of summaries) {
+          // Box A — Result Efficiency
+          const aPoints = s.result === "W" ? 14 : s.result === "D" ? 6 : -12;
+          boxA += aPoints;
+
+          // Box B — Odds Performance (team's own odds for this match)
+          const matchOdds = pastOddsMap.get(s.eventId);
+          const teamOdds = matchOdds ? (s.isHome ? matchOdds.home : matchOdds.away) : null;
+          const oppOdds  = matchOdds ? (s.isHome ? matchOdds.away : matchOdds.home) : null;
+
+          if (teamOdds !== null) {
+            const role = teamOdds >= 2.81 ? "underdog" : teamOdds >= 2.01 ? "balanced" : "favourite";
+            let bPoints = 0;
+            if (s.result === "W")      bPoints = role === "underdog" ? 15 : role === "balanced" ? 10 : 5;
+            else if (s.result === "D") bPoints = role === "underdog" ? 10 : role === "balanced" ? 6 : -4;
+            else                       bPoints = role === "underdog" ? -5 : role === "balanced" ? -2 : -10;
+            boxB += bPoints;
+          }
+
+          // Box C — Match Control (HT → FT)
+          const ht = s.htResult, ft = s.result;
+          if      (ht === "losing"  && ft === "W") boxC += 10; // comeback
+          else if (ht === "winning" && ft === "W") boxC += 8;  // held on
+          else if (ht === "level"   && ft === "W") boxC += 6;  // second-half winner
+          else if (ht === "losing"  && ft === "D") boxC += 5;  // salvaged draw
+          else if (ht === "level"   && ft === "D") boxC += 3;
+          else if (ht === "winning" && ft === "D") boxC -= 4;  // dropped points
+          else if (ht === "level"   && ft === "L") boxC -= 6;
+          else if (ht === "winning" && ft === "L") boxC -= 8;  // total collapse
+
+          // Box D — Opponent Strength (opponent's odds as proxy for quality)
+          if (oppOdds !== null) {
+            const tier = oppOdds < 1.6 ? "top" : oppOdds <= 2.5 ? "mid" : "bottom";
+            let dPoints = 0;
+            if      (s.result === "W") dPoints = tier === "top" ? 12 : tier === "mid" ? 8 : 4;
+            else if (s.result === "D") dPoints = tier === "top" ? 8  : tier === "mid" ? 5 : 2;
+            else                       dPoints = tier === "top" ? -6 : tier === "mid" ? -4 : -2;
+            boxD += dPoints;
+          }
+
+          breakdown.push(`[${s.date}] ${s.result} vs ${s.opponent} (${s.side}) A:${aPoints}`);
+        }
+
+        const total = boxA + boxB + boxC + boxD;
+        const momentum = total >= 300 ? "High" : total >= 150 ? "Medium" : "Low";
+        return { total, boxA, boxB, boxC, boxD, momentum, oddsAvailable: pastOddsMap.size > 0 };
+      }
+
+      const homeTMP = calculateTMP(homeSummaries);
+      const awayTMP  = calculateTMP(awaySummaries);
+
+      // ── Aggregate stats ──────────────────────────────────────────────────────
+
       function computeStats(summaries: ReturnType<typeof summarizeMatch>[]) {
         const played = summaries.length;
         if (played === 0) return null;
-        const wins = summaries.filter(s => s.result === "W").length;
-        const draws = summaries.filter(s => s.result === "D").length;
+        const wins   = summaries.filter(s => s.result === "W").length;
+        const draws  = summaries.filter(s => s.result === "D").length;
         const losses = summaries.filter(s => s.result === "L").length;
-        const goalsScored = summaries.reduce((a, s) => a + s.goalsScored, 0);
-        const goalsConceded = summaries.reduce((a, s) => a + s.goalsConceded, 0);
-        const cleanSheets = summaries.filter(s => s.cleanSheet).length;
-        const failedToScore = summaries.filter(s => !s.scored).length;
-        const btts = summaries.filter(s => s.scored && !s.cleanSheet).length;
+        const gf     = summaries.reduce((a, s) => a + s.goalsScored,   0);
+        const ga     = summaries.reduce((a, s) => a + s.goalsConceded, 0);
+        const cs     = summaries.filter(s => s.cleanSheet).length;
+        const fts    = summaries.filter(s => !s.scored).length;
+        const btts   = summaries.filter(s => s.scored && !s.cleanSheet).length;
         const over25 = summaries.filter(s => s.totalGoals > 2).length;
-        const over15 = summaries.filter(s => s.totalGoals > 1).length;
-        const homeMatches = summaries.filter(s => s.side === "Home");
-        const awayMatches = summaries.filter(s => s.side === "Away");
-        const homeWins = homeMatches.filter(s => s.result === "W").length;
-        const awayWins = awayMatches.filter(s => s.result === "W").length;
-        const last5 = summaries.slice(0, 5);
-        const last5Form = last5.map(s => s.result).join("");
-        const avgGoalsScored = goalsScored / played;
-        const avgGoalsConceded = goalsConceded / played;
+        const hm = summaries.filter(s => s.side === "Home");
+        const am = summaries.filter(s => s.side === "Away");
+        const hw = hm.filter(s => s.result === "W").length;
+        const aw = am.filter(s => s.result === "W").length;
+        const hd = hm.filter(s => s.result === "D").length;
+        const ad = am.filter(s => s.result === "D").length;
+        const comebacks  = summaries.filter(s => s.htResult === "losing"  && s.result === "W").length;
+        const collapses  = summaries.filter(s => s.htResult === "winning" && s.result === "L").length;
+        const droppedPts = summaries.filter(s => s.htResult === "winning" && s.result === "D").length;
         return {
-          played, wins, draws, losses, goalsScored, goalsConceded,
-          cleanSheets, failedToScore, btts, over25, over15,
-          homeRecord: `${homeWins}W/${homeMatches.length - homeWins - homeMatches.filter(s => s.result === "D").length}L/${homeMatches.filter(s => s.result === "D").length}D`,
-          awayRecord: `${awayWins}W/${awayMatches.length - awayWins - awayMatches.filter(s => s.result === "D").length}L/${awayMatches.filter(s => s.result === "D").length}D`,
-          last5Form,
-          avgGoalsScored: Math.round(avgGoalsScored * 100) / 100,
-          avgGoalsConceded: Math.round(avgGoalsConceded * 100) / 100,
+          played, wins, draws, losses, gf, ga,
+          avgGF: Math.round(gf / played * 100) / 100,
+          avgGA: Math.round(ga / played * 100) / 100,
+          cs, fts, btts, over25,
+          homeRecord: `${hw}W-${hm.length - hw - hd}L-${hd}D`,
+          awayRecord: `${aw}W-${am.length - aw - ad}L-${ad}D`,
+          last5Form: summaries.slice(0, 5).map(s => s.result).join(""),
+          comebacks, collapses, droppedPts,
         };
       }
 
       const homeStats = computeStats(homeSummaries);
-      const awayStats = computeStats(awaySummaries);
+      const awayStats  = computeStats(awaySummaries);
 
-      // Extract relevant odds from the current match
-      const relevantOdds: Record<string, any> = {};
-      if (oddsData && (oddsData as any)?.markets) {
-        const markets = (oddsData as any).markets;
-        for (const market of markets.slice(0, 8)) {
-          relevantOdds[market.marketName || market.id] = (market.choices || []).map((c: any) => ({
-            name: c.name,
-            fractionalValue: c.fractionalValue,
-            initialFractionalValue: c.initialFractionalValue,
-          }));
-        }
-      }
+      // ── Current match odds (for value assessment) ────────────────────────────
 
-      const prompt = `You are an expert football betting analyst with deep knowledge of football statistics, team dynamics, player psychology, and betting markets. Your task is to perform a rigorous, multi-layered analysis of an upcoming match to identify profitable betting markets.
+      const currentMatchOdds = extractFTOdds(currentMatchOddsRaw);
 
+      // ── Build prompt ─────────────────────────────────────────────────────────
+
+      const tmpOddsNote = homeTMP.oddsAvailable
+        ? "TMP Boxes B & D are computed from actual historical odds for each match."
+        : "TMP Boxes B & D could not be computed (historical odds unavailable); only Boxes A & C are scored.";
+
+      const prompt = `You are an elite football betting analyst combining deep statistical reasoning with market intelligence. Your job is to find profitable betting markets for the following match — not just based on surface form, but by integrating momentum quality, opponent weighting, resilience, and value against the current odds.
+
+═══════════════════════════════════════════
 MATCH: ${homeTeamName} vs ${awayTeamName}
 COMPETITION: ${tournamentName || "Unknown"}
 ${currentEvent ? `DATE: ${new Date(currentEvent.startTimestamp * 1000).toISOString().split("T")[0]}` : ""}
+${currentMatchOdds.home ? `CURRENT ODDS: Home ${currentMatchOdds.home} | Draw ${currentMatchOdds.draw} | Away ${currentMatchOdds.away}` : ""}
+═══════════════════════════════════════════
 
-=== ${homeTeamName?.toUpperCase()} - LAST ${homeSummaries.length} MATCHES ===
-Overall Stats: ${homeStats ? `${homeStats.wins}W ${homeStats.draws}D ${homeStats.losses}L | GF:${homeStats.goalsScored} GA:${homeStats.goalsConceded} | Avg GF:${homeStats.avgGoalsScored} Avg GA:${homeStats.avgGoalsConceded}` : "N/A"}
-${homeStats ? `Clean Sheets: ${homeStats.cleanSheets}/${homeStats.played} | Failed to Score: ${homeStats.failedToScore}/${homeStats.played} | BTTS: ${homeStats.btts}/${homeStats.played} | Over 2.5: ${homeStats.over25}/${homeStats.played}` : ""}
-${homeStats ? `Last 5 Form: ${homeStats.last5Form} | Home Record: ${homeStats.homeRecord} | Away Record: ${homeStats.awayRecord}` : ""}
+━━━ TEAM MOMENTUM PERFORMANCE (TMP) ━━━
+TMP is a 0–400 composite score: quality and character of results, not just wins/losses.
+Pillar A = Result Efficiency | B = Odds Performance | C = Match Control (HT→FT) | D = Opponent Strength
+${tmpOddsNote}
 
-Match-by-match (most recent first):
-${homeSummaries.map((m, i) => `${i + 1}. [${m.date}] ${m.side} vs ${m.opponent} (${m.competition}): ${m.result} ${m.score}`).join("\n")}
+${homeTeamName} TMP: ${homeTMP.total} (${homeTMP.momentum} momentum)
+  └ A:${homeTMP.boxA} B:${homeTMP.boxB} C:${homeTMP.boxC} D:${homeTMP.boxD}
+  └ Ratings: 300+=High · 150-299=Medium · <150=Low
 
-=== ${awayTeamName?.toUpperCase()} - LAST ${awaySummaries.length} MATCHES ===
-Overall Stats: ${awayStats ? `${awayStats.wins}W ${awayStats.draws}D ${awayStats.losses}L | GF:${awayStats.goalsScored} GA:${awayStats.goalsConceded} | Avg GF:${awayStats.avgGoalsScored} Avg GA:${awayStats.avgGoalsConceded}` : "N/A"}
-${awayStats ? `Clean Sheets: ${awayStats.cleanSheets}/${awayStats.played} | Failed to Score: ${awayStats.failedToScore}/${awayStats.played} | BTTS: ${awayStats.btts}/${awayStats.played} | Over 2.5: ${awayStats.over25}/${awayStats.played}` : ""}
-${awayStats ? `Last 5 Form: ${awayStats.last5Form} | Home Record: ${awayStats.homeRecord} | Away Record: ${awayStats.awayRecord}` : ""}
+${awayTeamName} TMP: ${awayTMP.total} (${awayTMP.momentum} momentum)
+  └ A:${awayTMP.boxA} B:${awayTMP.boxB} C:${awayTMP.boxC} D:${awayTMP.boxD}
 
-Match-by-match (most recent first):
-${awaySummaries.map((m, i) => `${i + 1}. [${m.date}] ${m.side} vs ${m.opponent} (${m.competition}): ${m.result} ${m.score}`).join("\n")}
+TMP Gap: ${Math.abs(homeTMP.total - awayTMP.total)} points in favour of ${homeTMP.total >= awayTMP.total ? homeTeamName : awayTeamName}
 
-${Object.keys(relevantOdds).length > 0 ? `=== CURRENT MATCH ODDS ===\n${JSON.stringify(relevantOdds, null, 2)}` : ""}
+━━━ ${homeTeamName?.toUpperCase()} — LAST ${homeSummaries.length} MATCHES ━━━
+Record: ${homeStats?.wins}W ${homeStats?.draws}D ${homeStats?.losses}L | GF:${homeStats?.gf} GA:${homeStats?.ga} | Avg GF:${homeStats?.avgGF} GA:${homeStats?.avgGA}
+Home: ${homeStats?.homeRecord} | Away: ${homeStats?.awayRecord} | Last 5: ${homeStats?.last5Form}
+Clean Sheets: ${homeStats?.cs}/${homeStats?.played} | Failed to Score: ${homeStats?.fts}/${homeStats?.played}
+BTTS: ${homeStats?.btts}/${homeStats?.played} | Over 2.5: ${homeStats?.over25}/${homeStats?.played}
+Resilience: ${homeStats?.comebacks} comebacks | Collapses: ${homeStats?.collapses} | Dropped leads: ${homeStats?.droppedPts}
 
-=== YOUR ANALYSIS TASK ===
-Perform a deep, reasoning-heavy analysis. Think step by step through the following:
+Match log (newest first):
+${homeSummaries.map((m, i) => {
+  const odds = pastOddsMap.get(m.eventId);
+  const teamOdds = odds ? (m.isHome ? odds.home : odds.away) : null;
+  const oppOdds  = odds ? (m.isHome ? odds.away : odds.home) : null;
+  return `${i + 1}. [${m.date}] ${m.side} vs ${m.opponent} (${m.competition}): ${m.result} ${m.score} | HT:${m.htResult}${teamOdds ? ` | OwnOdds:${teamOdds}` : ""}${oppOdds ? ` OppOdds:${oppOdds}` : ""}`;
+}).join("\n")}
 
-1. MOMENTUM & FORM: Is each team on an upward or downward trajectory? Are wins/losses consistent or sporadic?
-2. OPPONENT QUALITY: What level of opponents have they been beating or losing to? Wins against weak teams mean less.
-3. HOME/AWAY PATTERNS: How do each team perform at home vs away? Is there a significant difference?
-4. GOALS PATTERNS: Analyze scoring and conceding trends. Are they defensively solid recently or leaking goals? Do they tend to keep clean sheets or concede?
-5. CONTEXT FACTORS: Competition importance (league vs cup), scheduling fatigue, momentum shifts.
-6. HEAD-TO-HEAD CONSIDERATIONS: Based on the statistical profiles, predict how these two specific teams match up stylistically.
-7. ODDS ANALYSIS: If odds are provided, identify any value discrepancies vs your statistical assessment.
+━━━ ${awayTeamName?.toUpperCase()} — LAST ${awaySummaries.length} MATCHES ━━━
+Record: ${awayStats?.wins}W ${awayStats?.draws}D ${awayStats?.losses}L | GF:${awayStats?.gf} GA:${awayStats?.ga} | Avg GF:${awayStats?.avgGF} GA:${awayStats?.avgGA}
+Home: ${awayStats?.homeRecord} | Away: ${awayStats?.awayRecord} | Last 5: ${awayStats?.last5Form}
+Clean Sheets: ${awayStats?.cs}/${awayStats?.played} | Failed to Score: ${awayStats?.fts}/${awayStats?.played}
+BTTS: ${awayStats?.btts}/${awayStats?.played} | Over 2.5: ${awayStats?.over25}/${awayStats?.played}
+Resilience: ${awayStats?.comebacks} comebacks | Collapses: ${awayStats?.collapses} | Dropped leads: ${awayStats?.droppedPts}
 
-Then output ONLY a valid JSON object (no markdown, no code blocks) with this exact structure:
+Match log (newest first):
+${awaySummaries.map((m, i) => {
+  const odds = pastOddsMap.get(m.eventId);
+  const teamOdds = odds ? (m.isHome ? odds.home : odds.away) : null;
+  const oppOdds  = odds ? (m.isHome ? odds.away : odds.home) : null;
+  return `${i + 1}. [${m.date}] ${m.side} vs ${m.opponent} (${m.competition}): ${m.result} ${m.score} | HT:${m.htResult}${teamOdds ? ` | OwnOdds:${teamOdds}` : ""}${oppOdds ? ` OppOdds:${oppOdds}` : ""}`;
+}).join("\n")}
+
+━━━ ANALYSIS FRAMEWORK ━━━
+Reason carefully through each of these before forming predictions:
+
+1. TMP MOMENTUM GAP: What does the TMP gap signal? A large gap (>80 pts) is significant. Interpret the pillar breakdown — is one team winning against weak opponents (high A, low D) or consistently beating expectations (high B)?
+
+2. MATCH CONTROL PATTERN (Box C): Teams with high C scores are resilient fighters. Teams with negative C scores collapse under pressure. How will this dynamic play out?
+
+3. OPPONENT QUALITY FILTER (Box D): Strip away wins vs weak opponents. What does each team's record look like against mid-to-top opponents only?
+
+4. HOME/AWAY CONTEXT: This team plays at home — do home/away splits match or contradict the overall form story?
+
+5. GOALS ENVIRONMENT: Combine both teams' avg GF and GA, BTTS rate, Over 2.5 rate. What total goals environment does this matchup create?
+
+6. VALUE VS CURRENT ODDS: If current odds are provided, does the statistical picture suggest the market has over or under-priced either side? A statistically stronger team priced shorter than their TMP warrants is bad value; one priced longer is good value.
+
+7. RED FLAGS: Identify any data points that should prevent you from betting a market confidently (e.g. high variance, near-zero BTTS, wildly different competition levels in recent matches).
+
+Output ONLY a valid JSON object. No markdown, no code blocks, no explanation outside the JSON:
 {
-  "summary": "2-3 sentence sharp overview of the matchup",
+  "summary": "3-sentence sharp overview integrating TMP scores and the most decisive statistical contrast",
+  "tmpInterpretation": "1-2 sentences explaining what the TMP gap and pillar breakdown tells you about momentum quality",
   "homeTeamAnalysis": {
-    "form": "description of recent form trend",
-    "strengths": ["strength 1", "strength 2"],
-    "weaknesses": ["weakness 1", "weakness 2"],
-    "keyTrend": "the single most important statistical trend"
+    "form": "trend description integrating TMP pillar insights",
+    "strengths": ["specific stat-backed strength 1", "specific stat-backed strength 2"],
+    "weaknesses": ["specific stat-backed weakness 1", "specific stat-backed weakness 2"],
+    "keyTrend": "the single most predictively powerful trend for this match"
   },
   "awayTeamAnalysis": {
-    "form": "description of recent form trend",
-    "strengths": ["strength 1", "strength 2"],
-    "weaknesses": ["weakness 1", "weakness 2"],
-    "keyTrend": "the single most important statistical trend"
+    "form": "trend description integrating TMP pillar insights",
+    "strengths": ["specific stat-backed strength 1", "specific stat-backed strength 2"],
+    "weaknesses": ["specific stat-backed weakness 1", "specific stat-backed weakness 2"],
+    "keyTrend": "the single most predictively powerful trend for this match"
   },
   "predictions": [
     {
       "market": "Match Result (1X2)",
       "pick": "Home Win / Draw / Away Win",
       "confidence": 75,
-      "reasoning": "detailed reasoning why this is the right pick and what could invalidate it"
+      "reasoning": "detailed reasoning referencing TMP, form, opponent quality, and what could invalidate it"
     },
     {
       "market": "Goals Over/Under 2.5",
       "pick": "Over 2.5 / Under 2.5",
       "confidence": 70,
-      "reasoning": "detailed reasoning"
+      "reasoning": "detailed reasoning referencing both teams' scoring/conceding and BTTS rates"
     },
     {
       "market": "Both Teams to Score",
@@ -389,19 +556,19 @@ Then output ONLY a valid JSON object (no markdown, no code blocks) with this exa
     },
     {
       "market": "Double Chance",
-      "pick": "Home/Draw or Away/Draw or Home/Away",
+      "pick": "1X / X2 / 12",
       "confidence": 80,
       "reasoning": "detailed reasoning"
     }
   ],
   "bestBet": {
-    "market": "the single highest confidence bet market name",
-    "pick": "the pick for best bet",
+    "market": "market name",
+    "pick": "pick",
     "confidence": 82,
-    "reasoning": "why this is the safest most profitable bet"
+    "reasoning": "why this is the most statistically robust bet and what would invalidate it"
   },
-  "riskFactors": ["factor 1 that could invalidate predictions", "factor 2"],
-  "dataConfidence": "High / Medium / Low - based on how much data was available"
+  "riskFactors": ["specific risk 1 with data reasoning", "specific risk 2"],
+  "dataConfidence": "High / Medium / Low"
 }`;
 
       const response = await openai.chat.completions.create({
@@ -431,6 +598,8 @@ Then output ONLY a valid JSON object (no markdown, no code blocks) with this exa
           awayMatchesAnalyzed: awaySummaries.length,
           homeStats,
           awayStats,
+          homeTMP,
+          awayTMP,
         },
       });
     } catch (error: any) {
