@@ -20,8 +20,9 @@ import StatisticsTab from "@/components/match/StatisticsTab";
 import StandingsTab from "@/components/match/StandingsTab";
 import MatchesTab from "@/components/match/MatchesTab";
 import OddsTab from "@/components/match/OddsTab";
+import AIInsightTab from "@/components/match/AIInsightTab";
 
-const TABS = ["Details", "Lineups", "Statistics", "Standings", "Matches", "Odds"] as const;
+const TABS = ["Details", "Lineups", "Statistics", "Standings", "Matches", "Odds", "AI Insight"] as const;
 type TabName = (typeof TABS)[number];
 
 interface EventResponse {
@@ -227,6 +228,16 @@ export default function MatchDetailScreen() {
         )}
         {activeTab === "Odds" && (
           <OddsTab eventId={eventId} />
+        )}
+        {activeTab === "AI Insight" && (
+          <AIInsightTab
+            eventId={eventId}
+            homeTeamId={homeTeamId}
+            awayTeamId={awayTeamId}
+            homeTeamName={homeTeamName}
+            awayTeamName={awayTeamName}
+            tournamentName={tournamentName}
+          />
         )}
       </View>
     </View>
