@@ -84,6 +84,31 @@ interface FormSummary {
   recentForm: ("W" | "D" | "L")[];
 }
 
+interface TeamMatchStats {
+  avgPossession: number | null;
+  avgXg: number | null;
+  avgBigChances: number | null;
+  avgTotalShots: number | null;
+  avgShotsOnTarget: number | null;
+  avgShotsOffTarget: number | null;
+  avgBlockedShots: number | null;
+  avgShotsInsideBox: number | null;
+  avgBigChancesScored: number | null;
+  avgBigChancesMissed: number | null;
+  avgCornerKicks: number | null;
+  avgGoalkeeperSaves: number | null;
+  avgGoalsPrevented: number | null;
+  avgPassAccuracy: number | null;
+  avgTacklesWon: number | null;
+  avgInterceptions: number | null;
+  avgClearances: number | null;
+  avgFouls: number | null;
+  avgTotalPasses: number | null;
+  avgTouchesInOppositionBox: number | null;
+  avgDuelsWon: number | null;
+  matchesWithStats: number;
+}
+
 interface SimulationMetricsResponse {
   home?: {
     formation?: string | null;
@@ -106,6 +131,7 @@ interface SimulationMetricsResponse {
     unavailableCount?: number;
     activeLast5Count?: number;
     matchesAnalyzed?: number;
+    teamMatchStats?: TeamMatchStats;
   };
   away?: {
     formation?: string | null;
@@ -128,6 +154,7 @@ interface SimulationMetricsResponse {
     unavailableCount?: number;
     activeLast5Count?: number;
     matchesAnalyzed?: number;
+    teamMatchStats?: TeamMatchStats;
   };
 }
 
@@ -344,6 +371,26 @@ function createLiveEvent(
   return { minute, team, type, text: textByType[type] };
 }
 
+function teamStatsAttackFactor(ts?: TeamMatchStats | null): number | null {
+  if (!ts) return null;
+  const xgF = ts.avgXg != null ? clampForSimulation(4 + (ts.avgXg / 2.0) * 4, 3, 9.5) : null;
+  const sotF = ts.avgShotsOnTarget != null ? clampForSimulation(4 + (ts.avgShotsOnTarget / 5.5) * 3.5, 3, 9.5) : null;
+  const bcF = ts.avgBigChances != null ? clampForSimulation(4 + (ts.avgBigChances / 4.5) * 3, 3, 9) : null;
+  const sibF = ts.avgShotsInsideBox != null ? clampForSimulation(4 + (ts.avgShotsInsideBox / 8) * 3, 3, 9) : null;
+  const vals = [xgF, sotF, bcF, sibF].filter((v): v is number => v !== null);
+  return vals.length > 0 ? vals.reduce((s, v) => s + v, 0) / vals.length : null;
+}
+
+function teamStatsDefenseFactor(ts?: TeamMatchStats | null): number | null {
+  if (!ts) return null;
+  const gpF = ts.avgGoalsPrevented != null ? clampForSimulation(6 + ts.avgGoalsPrevented * 2.2, 3, 9.5) : null;
+  const clrF = ts.avgClearances != null ? clampForSimulation(4 + (ts.avgClearances / 17) * 3.5, 3, 9) : null;
+  const intF = ts.avgInterceptions != null ? clampForSimulation(4 + (ts.avgInterceptions / 10) * 3.5, 3, 9) : null;
+  const twF = ts.avgTacklesWon != null ? clampForSimulation(4 + (ts.avgTacklesWon / 60) * 4, 3, 9) : null;
+  const vals = [gpF, clrF, intF, twF].filter((v): v is number => v !== null);
+  return vals.length > 0 ? vals.reduce((s, v) => s + v, 0) / vals.length : null;
+}
+
 function buildSimulationContext({
   homePlayers,
   awayPlayers,
@@ -353,6 +400,8 @@ function buildSimulationContext({
   awayPhases,
   homeForm,
   awayForm,
+  homeTeamStats,
+  awayTeamStats,
 }: {
   homePlayers: PlayerData[];
   awayPlayers: PlayerData[];
@@ -362,6 +411,8 @@ function buildSimulationContext({
   awayPhases?: PhaseStrengths;
   homeForm?: FormSummary;
   awayForm?: FormSummary;
+  homeTeamStats?: TeamMatchStats | null;
+  awayTeamStats?: TeamMatchStats | null;
 }) {
   const homeScoring = homeForm?.scoringStrength || homePhases?.attackStrength || homeStrength || 6.4;
   const awayScoring = awayForm?.scoringStrength || awayPhases?.attackStrength || awayStrength || 6.4;
@@ -369,27 +420,44 @@ function buildSimulationContext({
   const awayDefending = awayForm?.defendingStrength || awayPhases?.defensiveStrength || awayStrength || 6.4;
   const homeFormBoost = homeForm?.formStrength || homeStrength || 6.4;
   const awayFormBoost = awayForm?.formStrength || awayStrength || 6.4;
-  const homePower = (homeScoring * 0.48) + ((homePhases?.midfieldStrength || homeStrength || 6.4) * 0.2) + ((homePhases?.fullbackStrength || homeStrength || 6.4) * 0.12) + (homeFormBoost * 0.2);
-  const awayPower = (awayScoring * 0.48) + ((awayPhases?.midfieldStrength || awayStrength || 6.4) * 0.2) + ((awayPhases?.fullbackStrength || awayStrength || 6.4) * 0.12) + (awayFormBoost * 0.2);
+
+  const homeStatsAttack = teamStatsAttackFactor(homeTeamStats);
+  const awayStatsAttack = teamStatsAttackFactor(awayTeamStats);
+  const homeStatsDefense = teamStatsDefenseFactor(homeTeamStats);
+  const awayStatsDefense = teamStatsDefenseFactor(awayTeamStats);
+
+  const blendedHomeScoring = homeStatsAttack != null ? homeScoring * 0.62 + homeStatsAttack * 0.38 : homeScoring;
+  const blendedAwayScoring = awayStatsAttack != null ? awayScoring * 0.62 + awayStatsAttack * 0.38 : awayScoring;
+
+  const homePower = (blendedHomeScoring * 0.48) + ((homePhases?.midfieldStrength || homeStrength || 6.4) * 0.2) + ((homePhases?.fullbackStrength || homeStrength || 6.4) * 0.12) + (homeFormBoost * 0.2);
+  const awayPower = (blendedAwayScoring * 0.48) + ((awayPhases?.midfieldStrength || awayStrength || 6.4) * 0.2) + ((awayPhases?.fullbackStrength || awayStrength || 6.4) * 0.12) + (awayFormBoost * 0.2);
   const totalPower = Math.max(homePower + awayPower, 1);
   const homeChance = homePower / totalPower;
+
+  const rawPossession = homeTeamStats?.avgPossession ?? null;
+  const possessionTarget = rawPossession != null
+    ? Math.round(rawPossession * 0.6 + homeChance * 100 * 0.4)
+    : Math.round(homeChance * 100);
 
   const homeAttackScores = homePlayers.map((player) => Math.max(getPlayerScore(player), getRoleStrength(player)));
   const homeDefenseScores = homePlayers.map((player) => Math.max(getPlayerScore(player), getRoleStrength(player)));
   const awayAttackScores = awayPlayers.map((player) => Math.max(getPlayerScore(player), getRoleStrength(player)));
   const awayDefenseScores = awayPlayers.map((player) => Math.max(getPlayerScore(player), getRoleStrength(player)));
 
+  const rawHomeDefBase = (homeDefending * 0.48) + ((homePhases?.keeperStrength || homeStrength || 6.4) * 0.28) + ((homePhases?.midfieldStrength || homeStrength || 6.4) * 0.16) + (homeFormBoost * 0.08);
+  const rawAwayDefBase = (awayDefending * 0.48) + ((awayPhases?.keeperStrength || awayStrength || 6.4) * 0.28) + ((awayPhases?.midfieldStrength || awayStrength || 6.4) * 0.16) + (awayFormBoost * 0.08);
+
   return {
     homeChance,
-    possessionTarget: Math.round(homeChance * 100),
+    possessionTarget,
     homeAttackScores: homeAttackScores.length ? homeAttackScores : [6],
     homeDefenseScores: homeDefenseScores.length ? homeDefenseScores : [6],
     awayAttackScores: awayAttackScores.length ? awayAttackScores : [6],
     awayDefenseScores: awayDefenseScores.length ? awayDefenseScores : [6],
-    homeScoringBase: homeScoring,
-    awayScoringBase: awayScoring,
-    homeDefensiveBase: (homeDefending * 0.48) + ((homePhases?.keeperStrength || homeStrength || 6.4) * 0.28) + ((homePhases?.midfieldStrength || homeStrength || 6.4) * 0.16) + (homeFormBoost * 0.08),
-    awayDefensiveBase: (awayDefending * 0.48) + ((awayPhases?.keeperStrength || awayStrength || 6.4) * 0.28) + ((awayPhases?.midfieldStrength || awayStrength || 6.4) * 0.16) + (awayFormBoost * 0.08),
+    homeScoringBase: blendedHomeScoring,
+    awayScoringBase: blendedAwayScoring,
+    homeDefensiveBase: homeStatsDefense != null ? rawHomeDefBase * 0.62 + homeStatsDefense * 0.38 : rawHomeDefBase,
+    awayDefensiveBase: awayStatsDefense != null ? rawAwayDefBase * 0.62 + awayStatsDefense * 0.38 : rawAwayDefBase,
   };
 }
 
@@ -452,6 +520,8 @@ function SimulationPanel({
   awayPhases,
   homeForm,
   awayForm,
+  homeTeamStats,
+  awayTeamStats,
 }: {
   homeTeamName: string;
   awayTeamName: string;
@@ -463,6 +533,8 @@ function SimulationPanel({
   awayPhases?: PhaseStrengths;
   homeForm?: FormSummary;
   awayForm?: FormSummary;
+  homeTeamStats?: TeamMatchStats | null;
+  awayTeamStats?: TeamMatchStats | null;
 }) {
   const [state, setState] = useState<SimulationState>({
     running: false,
@@ -487,8 +559,10 @@ function SimulationPanel({
         awayPhases,
         homeForm,
         awayForm,
+        homeTeamStats,
+        awayTeamStats,
       }),
-    [awayForm, awayPhases, awayPlayers, awayStrength, homeForm, homePhases, homePlayers, homeStrength],
+    [awayForm, awayPhases, awayPlayers, awayStrength, awayTeamStats, homeForm, homePhases, homePlayers, homeStrength, homeTeamStats],
   );
 
   const resetSimulation = useCallback(() => {
@@ -705,6 +779,99 @@ function PhaseStrengthCard({
   );
 }
 
+function fmt(value: number | null | undefined, unit?: string): string {
+  if (value === null || value === undefined) return "—";
+  const str = Number.isInteger(value) ? String(value) : value.toFixed(1);
+  return unit ? `${str}${unit}` : str;
+}
+
+function statColor(homeVal: number | null | undefined, awayVal: number | null | undefined, higherIsBetter: boolean): { home: string; away: string } {
+  if (homeVal == null || awayVal == null) return { home: Colors.dark.textSecondary, away: Colors.dark.textSecondary };
+  const homeWins = higherIsBetter ? homeVal > awayVal : homeVal < awayVal;
+  const awayWins = higherIsBetter ? awayVal > homeVal : awayVal < homeVal;
+  return {
+    home: homeWins ? "#22c55e" : awayWins ? Colors.dark.textSecondary : Colors.dark.textSecondary,
+    away: awayWins ? "#22c55e" : homeWins ? Colors.dark.textSecondary : Colors.dark.textSecondary,
+  };
+}
+
+function Last7StatsCard({
+  homeTeamName,
+  awayTeamName,
+  homeStats,
+  awayStats,
+}: {
+  homeTeamName: string;
+  awayTeamName: string;
+  homeStats?: TeamMatchStats | null;
+  awayStats?: TeamMatchStats | null;
+}) {
+  if (!homeStats && !awayStats) return null;
+  const hasAnyStats = (homeStats?.matchesWithStats || 0) > 0 || (awayStats?.matchesWithStats || 0) > 0;
+  if (!hasAnyStats) return null;
+
+  type StatRow = {
+    label: string;
+    homeVal: number | null | undefined;
+    awayVal: number | null | undefined;
+    unit?: string;
+    higherIsBetter: boolean;
+    section?: string;
+  };
+
+  const rows: StatRow[] = [
+    { section: "Match Overview", label: "Possession", homeVal: homeStats?.avgPossession, awayVal: awayStats?.avgPossession, unit: "%", higherIsBetter: true },
+    { label: "Expected Goals (xG)", homeVal: homeStats?.avgXg, awayVal: awayStats?.avgXg, higherIsBetter: true },
+    { label: "Big Chances", homeVal: homeStats?.avgBigChances, awayVal: awayStats?.avgBigChances, higherIsBetter: true },
+    { label: "Total Shots", homeVal: homeStats?.avgTotalShots, awayVal: awayStats?.avgTotalShots, higherIsBetter: true },
+    { label: "Corner Kicks", homeVal: homeStats?.avgCornerKicks, awayVal: awayStats?.avgCornerKicks, higherIsBetter: true },
+    { label: "Fouls", homeVal: homeStats?.avgFouls, awayVal: awayStats?.avgFouls, higherIsBetter: false },
+    { section: "Shooting", label: "Shots on Target", homeVal: homeStats?.avgShotsOnTarget, awayVal: awayStats?.avgShotsOnTarget, higherIsBetter: true },
+    { label: "Shots off Target", homeVal: homeStats?.avgShotsOffTarget, awayVal: awayStats?.avgShotsOffTarget, higherIsBetter: false },
+    { label: "Blocked Shots", homeVal: homeStats?.avgBlockedShots, awayVal: awayStats?.avgBlockedShots, higherIsBetter: false },
+    { label: "Shots Inside Box", homeVal: homeStats?.avgShotsInsideBox, awayVal: awayStats?.avgShotsInsideBox, higherIsBetter: true },
+    { label: "Big Chances Scored", homeVal: homeStats?.avgBigChancesScored, awayVal: awayStats?.avgBigChancesScored, higherIsBetter: true },
+    { label: "Big Chances Missed", homeVal: homeStats?.avgBigChancesMissed, awayVal: awayStats?.avgBigChancesMissed, higherIsBetter: false },
+    { label: "Opp. Box Touches", homeVal: homeStats?.avgTouchesInOppositionBox, awayVal: awayStats?.avgTouchesInOppositionBox, higherIsBetter: true },
+    { section: "Passing", label: "Pass Accuracy", homeVal: homeStats?.avgPassAccuracy, awayVal: awayStats?.avgPassAccuracy, unit: "%", higherIsBetter: true },
+    { label: "Total Passes", homeVal: homeStats?.avgTotalPasses, awayVal: awayStats?.avgTotalPasses, higherIsBetter: true },
+    { section: "Defending", label: "Duels Won", homeVal: homeStats?.avgDuelsWon, awayVal: awayStats?.avgDuelsWon, unit: "%", higherIsBetter: true },
+    { label: "Tackles Won", homeVal: homeStats?.avgTacklesWon, awayVal: awayStats?.avgTacklesWon, unit: "%", higherIsBetter: true },
+    { label: "Interceptions", homeVal: homeStats?.avgInterceptions, awayVal: awayStats?.avgInterceptions, higherIsBetter: true },
+    { label: "Clearances", homeVal: homeStats?.avgClearances, awayVal: awayStats?.avgClearances, higherIsBetter: true },
+    { section: "Goalkeeping", label: "GK Saves", homeVal: homeStats?.avgGoalkeeperSaves, awayVal: awayStats?.avgGoalkeeperSaves, higherIsBetter: true },
+    { label: "Goals Prevented", homeVal: homeStats?.avgGoalsPrevented, awayVal: awayStats?.avgGoalsPrevented, higherIsBetter: true },
+  ];
+
+  return (
+    <View style={styles.phaseCard}>
+      <Text style={styles.cardLabel}>
+        Last 7 match stats · {homeStats?.matchesWithStats || 0}/{awayStats?.matchesWithStats || 0} matches with data
+      </Text>
+      <View style={styles.statsHeaderRow}>
+        <Text style={[styles.statsHeaderTeam, { color: Colors.dark.homeKit }]} numberOfLines={1}>{homeTeamName}</Text>
+        <Text style={styles.statsHeaderLabel}>Stat</Text>
+        <Text style={[styles.statsHeaderTeam, { color: Colors.dark.awayKit }]} numberOfLines={1}>{awayTeamName}</Text>
+      </View>
+      {rows.map((row, index) => {
+        const colors = statColor(row.homeVal, row.awayVal, row.higherIsBetter);
+        return (
+          <View key={`${row.label}-${index}`}>
+            {row.section && (
+              <Text style={styles.statsSectionLabel}>{row.section}</Text>
+            )}
+            <View style={styles.statsRow}>
+              <Text style={[styles.statsValue, { color: colors.home }]}>{fmt(row.homeVal, row.unit)}</Text>
+              <Text style={styles.statsLabel}>{row.label}</Text>
+              <Text style={[styles.statsValue, { color: colors.away, textAlign: "right" }]}>{fmt(row.awayVal, row.unit)}</Text>
+            </View>
+          </View>
+        );
+      })}
+    </View>
+  );
+}
+
 function FormStrengthCard({
   homeTeamName,
   awayTeamName,
@@ -894,6 +1061,13 @@ function StadiumSimulationTab({
         awayForm={simulationMetrics?.away?.formSummary}
       />
 
+      <Last7StatsCard
+        homeTeamName={homeTeamName}
+        awayTeamName={awayTeamName}
+        homeStats={simulationMetrics?.home?.teamMatchStats}
+        awayStats={simulationMetrics?.away?.teamMatchStats}
+      />
+
       <SimulationPanel
         homeTeamName={homeTeamName}
         awayTeamName={awayTeamName}
@@ -905,6 +1079,8 @@ function StadiumSimulationTab({
         awayPhases={simulationMetrics?.away?.phaseStrengths}
         homeForm={simulationMetrics?.home?.formSummary}
         awayForm={simulationMetrics?.away?.formSummary}
+        homeTeamStats={simulationMetrics?.home?.teamMatchStats}
+        awayTeamStats={simulationMetrics?.away?.teamMatchStats}
       />
 
       <View style={{ height: 32 }} />
@@ -1421,5 +1597,55 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontFamily: "Inter_400Regular",
     color: Colors.dark.textTertiary,
+  },
+  statsHeaderRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingBottom: 8,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: Colors.dark.border,
+    marginBottom: 4,
+  },
+  statsHeaderTeam: {
+    flex: 1,
+    fontSize: 11,
+    fontFamily: "Inter_700Bold",
+    textAlign: "center",
+  },
+  statsHeaderLabel: {
+    flex: 2,
+    fontSize: 11,
+    fontFamily: "Inter_600SemiBold",
+    color: Colors.dark.textTertiary,
+    textAlign: "center",
+  },
+  statsSectionLabel: {
+    fontSize: 10,
+    fontFamily: "Inter_700Bold",
+    color: Colors.dark.textTertiary,
+    textTransform: "uppercase",
+    letterSpacing: 0.6,
+    marginTop: 10,
+    marginBottom: 2,
+  },
+  statsRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingVertical: 5,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: "rgba(255,255,255,0.06)",
+  },
+  statsLabel: {
+    flex: 2,
+    fontSize: 11,
+    fontFamily: "Inter_400Regular",
+    color: Colors.dark.textSecondary,
+    textAlign: "center",
+  },
+  statsValue: {
+    flex: 1,
+    fontSize: 12,
+    fontFamily: "Inter_700Bold",
+    textAlign: "center",
   },
 });

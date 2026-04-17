@@ -537,6 +537,140 @@ export async function registerRoutes(app: Express): Promise<Server> {
           if (result.status === "fulfilled") lineupsByEventId.set(id, result.value);
         });
 
+        const homeLast7 = homeLast15.slice(0, 7);
+        const awayLast7 = awayLast15.slice(0, 7);
+        const last7EventIds = Array.from(new Set([...homeLast7, ...awayLast7].map((e: any) => e.id).filter(Boolean)));
+
+        const statsResults = await Promise.allSettled(
+          last7EventIds.map((id) => fetchSofaScore(`/event/${id}/statistics`)),
+        );
+        const statsByEventId = new Map<number, any>();
+        last7EventIds.forEach((id, index) => {
+          const result = statsResults[index];
+          if (result.status === "fulfilled") statsByEventId.set(id, result.value);
+        });
+
+        function parseStatNum(value: any): number | null {
+          if (value === null || value === undefined || value === "") return null;
+          const str = String(value).replace(/[^0-9.\-]/g, "");
+          const num = parseFloat(str);
+          return Number.isFinite(num) ? num : null;
+        }
+
+        function extractMatchStatForTeam(statisticsData: any, side: "home" | "away"): Record<string, number> {
+          const statMap: Record<string, number> = {};
+          const allPeriod = (statisticsData?.statistics || []).find((p: any) => p.period === "ALL") || statisticsData?.statistics?.[0];
+          if (!allPeriod) return statMap;
+          for (const group of (allPeriod.groups || [])) {
+            for (const item of (group.statisticsItems || [])) {
+              const rawName = (item.name || "").toLowerCase().trim();
+              const val = parseStatNum(item[side]);
+              if (rawName && val !== null) statMap[rawName] = val;
+            }
+          }
+          return statMap;
+        }
+
+        type TeamMatchStats = {
+          avgPossession: number | null;
+          avgXg: number | null;
+          avgBigChances: number | null;
+          avgTotalShots: number | null;
+          avgShotsOnTarget: number | null;
+          avgShotsOffTarget: number | null;
+          avgBlockedShots: number | null;
+          avgShotsInsideBox: number | null;
+          avgBigChancesScored: number | null;
+          avgBigChancesMissed: number | null;
+          avgCornerKicks: number | null;
+          avgGoalkeeperSaves: number | null;
+          avgGoalsPrevented: number | null;
+          avgPassAccuracy: number | null;
+          avgTacklesWon: number | null;
+          avgInterceptions: number | null;
+          avgClearances: number | null;
+          avgFouls: number | null;
+          avgTotalPasses: number | null;
+          avgTouchesInOppositionBox: number | null;
+          avgDuelsWon: number | null;
+          matchesWithStats: number;
+        };
+
+        function computeTeamMatchStats(events: any[], teamId: number): TeamMatchStats {
+          const samples: Record<string, number[]> = {};
+          const addSample = (key: string, val: number | null) => {
+            if (val !== null) {
+              if (!samples[key]) samples[key] = [];
+              samples[key].push(val);
+            }
+          };
+          let matchesWithStats = 0;
+          events.forEach((event: any) => {
+            const side = event.homeTeam?.id === teamId ? "home" : event.awayTeam?.id === teamId ? "away" : null;
+            if (!side) return;
+            const statsData = statsByEventId.get(event.id);
+            if (!statsData) return;
+            matchesWithStats += 1;
+            const s = extractMatchStatForTeam(statsData, side);
+            const get = (keys: string[]): number | null => {
+              for (const k of keys) {
+                const found = Object.keys(s).find((name) => name === k || name.includes(k));
+                if (found !== undefined) return s[found];
+              }
+              return null;
+            };
+            addSample("possession", get(["ball possession"]));
+            addSample("xg", get(["expected goals (xg)", "expected goals"]));
+            addSample("bigChances", get(["big chances"]));
+            addSample("totalShots", get(["total shots", "shots total"]));
+            addSample("shotsOnTarget", get(["shots on target"]));
+            addSample("shotsOffTarget", get(["shots off target"]));
+            addSample("blockedShots", get(["blocked shots"]));
+            addSample("shotsInsideBox", get(["shots inside box"]));
+            addSample("bigChancesScored", get(["big chances scored"]));
+            addSample("bigChancesMissed", get(["big chances missed"]));
+            addSample("cornerKicks", get(["corner kicks"]));
+            addSample("goalkeeperSaves", get(["goalkeeper saves"]));
+            addSample("goalsPrevented", get(["goals prevented"]));
+            addSample("passAccuracy", get(["pass accuracy", "passes %", "accurate passes %"]));
+            addSample("tacklesWon", get(["tackles won", "tackles %"]));
+            addSample("interceptions", get(["interceptions"]));
+            addSample("clearances", get(["clearances"]));
+            addSample("fouls", get(["fouls"]));
+            addSample("totalPasses", get(["total passes", "passes"]));
+            addSample("touchesOpBox", get(["touches in opposition box", "touches in opp. box"]));
+            addSample("duelsWon", get(["total duels won", "duels won"]));
+          });
+          const avg = (key: string): number | null => {
+            const vals = samples[key];
+            return vals && vals.length > 0 ? round1(vals.reduce((s2, v) => s2 + v, 0) / vals.length) : null;
+          };
+          return {
+            avgPossession: avg("possession"),
+            avgXg: avg("xg"),
+            avgBigChances: avg("bigChances"),
+            avgTotalShots: avg("totalShots"),
+            avgShotsOnTarget: avg("shotsOnTarget"),
+            avgShotsOffTarget: avg("shotsOffTarget"),
+            avgBlockedShots: avg("blockedShots"),
+            avgShotsInsideBox: avg("shotsInsideBox"),
+            avgBigChancesScored: avg("bigChancesScored"),
+            avgBigChancesMissed: avg("bigChancesMissed"),
+            avgCornerKicks: avg("cornerKicks"),
+            avgGoalkeeperSaves: avg("goalkeeperSaves"),
+            avgGoalsPrevented: avg("goalsPrevented"),
+            avgPassAccuracy: avg("passAccuracy"),
+            avgTacklesWon: avg("tacklesWon"),
+            avgInterceptions: avg("interceptions"),
+            avgClearances: avg("clearances"),
+            avgFouls: avg("fouls"),
+            avgTotalPasses: avg("totalPasses"),
+            avgTouchesInOppositionBox: avg("touchesOpBox"),
+            avgDuelsWon: avg("duelsWon"),
+            matchesWithStats,
+          };
+        }
+
         type PlayerHistory = {
           playerId: number;
           name: string;
@@ -1087,10 +1221,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
         const homeHistory = collectTeamHistory(homeLast15, homeTeamId);
         const awayHistory = collectTeamHistory(awayLast15, awayTeamId);
+        const homeTeamMatchStats = computeTeamMatchStats(homeLast7, homeTeamId);
+        const awayTeamMatchStats = computeTeamMatchStats(awayLast7, awayTeamId);
+
+        const homeSide = enrichSide("home", homeHistory, homeLast15, homeTeamId);
+        const awaySide = enrichSide("away", awayHistory, awayLast15, awayTeamId);
 
         res.json({
-          home: enrichSide("home", homeHistory, homeLast15, homeTeamId),
-          away: enrichSide("away", awayHistory, awayLast15, awayTeamId),
+          home: { ...homeSide, teamMatchStats: homeTeamMatchStats },
+          away: { ...awaySide, teamMatchStats: awayTeamMatchStats },
           confirmed: currentLineups?.confirmed ?? null,
           source: "last_15_role_based_lineup_statistics_with_likely_lineup_fallback",
         });
