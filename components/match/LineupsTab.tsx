@@ -18,12 +18,23 @@ interface PlayerData {
   substitute: boolean;
   jerseyNumber: number;
   statistics: { rating?: number };
+  avgRating?: number;
+  predictionConfidence?: string;
+  likelyLineupReason?: string;
 }
 
 interface LineupTeam {
   formation?: string;
   players: PlayerData[];
   missingPlayers?: MissingPlayer[];
+  isLikely?: boolean;
+  lineupSource?: string;
+  predictionSummary?: {
+    matchesAnalyzed?: number;
+    formationMatches?: number;
+    unavailableCount?: number;
+    method?: string;
+  };
 }
 
 interface MissingPlayer {
@@ -74,6 +85,7 @@ function LineupsTab({ eventId, homeTeamName, awayTeamName }: LineupsTabProps) {
   const starters = team?.players?.filter((p) => !p.substitute) || [];
   const subs = team?.players?.filter((p) => p.substitute) || [];
   const missingPlayers = team?.missingPlayers || [];
+  const isLikelyLineup = !!team?.isLikely;
 
   return (
     <ScrollView style={styles.container} showsVerticalScrollIndicator={false}>
@@ -107,11 +119,13 @@ function LineupsTab({ eventId, homeTeamName, awayTeamName }: LineupsTabProps) {
         </View>
       )}
 
-      {data?.confirmed === false && (
+      {(data?.confirmed === false || isLikelyLineup) && (
         <View style={styles.unconfirmedBanner}>
-          <Text style={styles.unconfirmedText}>Predicted lineups</Text>
+          <Text style={styles.unconfirmedText}>{isLikelyLineup ? "Likely lineup model" : "Predicted lineups"}</Text>
         </View>
       )}
+
+      {isLikelyLineup && <LikelyLineupSummary team={team} />}
 
       <MissingPlayersReport teamName={teamName} players={missingPlayers} />
 
@@ -137,7 +151,7 @@ function LineupsTab({ eventId, homeTeamName, awayTeamName }: LineupsTabProps) {
 }
 
 const PlayerRow = memo(({ player }: { player: PlayerData }) => {
-  const rating = player.statistics?.rating;
+  const rating = player.statistics?.rating ?? player.avgRating;
   const isHighRating = rating && rating >= 7.5;
 
   return (
@@ -151,10 +165,20 @@ const PlayerRow = memo(({ player }: { player: PlayerData }) => {
         contentFit="cover"
         cachePolicy="disk"
       />
-      <Text style={styles.playerName} numberOfLines={1}>
-        {player.player?.shortName || player.player?.name || ""}
-      </Text>
+      <View style={styles.playerTextWrap}>
+        <Text style={styles.playerName} numberOfLines={1}>
+          {player.player?.shortName || player.player?.name || ""}
+        </Text>
+        {player.likelyLineupReason ? (
+          <Text style={styles.playerReason} numberOfLines={1}>{player.likelyLineupReason}</Text>
+        ) : null}
+      </View>
       <Text style={styles.positionText}>{player.position}</Text>
+      {player.predictionConfidence ? (
+        <View style={styles.confidenceBadge}>
+          <Text style={styles.confidenceText}>{player.predictionConfidence}</Text>
+        </View>
+      ) : null}
       {rating ? (
         <View
           style={[styles.ratingBadge, isHighRating && styles.ratingBadgeHigh]}
@@ -162,6 +186,29 @@ const PlayerRow = memo(({ player }: { player: PlayerData }) => {
           <Text style={styles.ratingText}>{rating.toFixed(1)}</Text>
         </View>
       ) : null}
+    </View>
+  );
+});
+
+const LikelyLineupSummary = memo(({ team }: { team?: LineupTeam }) => {
+  const summary = team?.predictionSummary;
+  return (
+    <View style={styles.modelCard}>
+      <Text style={styles.modelTitle}>Weighted Rotation & Tactical Alignment</Text>
+      <Text style={styles.modelText}>
+        Built from the last {summary?.matchesAnalyzed || 15} team matches, the preferred {team?.formation || "formation"} shape,
+        recent last-5 involvement, and current injury/suspension removals.
+      </Text>
+      <View style={styles.modelStatsRow}>
+        <View style={styles.modelStat}>
+          <Text style={styles.modelStatValue}>{summary?.formationMatches ?? "-"}</Text>
+          <Text style={styles.modelStatLabel}>Shape matches</Text>
+        </View>
+        <View style={styles.modelStat}>
+          <Text style={styles.modelStatValue}>{summary?.unavailableCount ?? 0}</Text>
+          <Text style={styles.modelStatLabel}>Unavailable</Text>
+        </View>
+      </View>
     </View>
   );
 });
@@ -436,10 +483,19 @@ const styles = StyleSheet.create({
     backgroundColor: Colors.dark.border,
   },
   playerName: {
-    flex: 1,
     fontSize: 13,
     fontFamily: "Inter_400Regular",
     color: Colors.dark.text,
+  },
+  playerTextWrap: {
+    flex: 1,
+    minWidth: 0,
+  },
+  playerReason: {
+    fontSize: 10,
+    fontFamily: "Inter_400Regular",
+    color: Colors.dark.textTertiary,
+    marginTop: 2,
   },
   positionText: {
     fontSize: 11,
@@ -447,6 +503,17 @@ const styles = StyleSheet.create({
     color: Colors.dark.textSecondary,
     width: 16,
     textAlign: "center",
+  },
+  confidenceBadge: {
+    backgroundColor: Colors.dark.surfaceSecondary,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  confidenceText: {
+    fontSize: 9,
+    fontFamily: "Inter_700Bold",
+    color: Colors.dark.textSecondary,
   },
   ratingBadge: {
     backgroundColor: Colors.dark.surfaceSecondary,
@@ -463,5 +530,49 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontFamily: "Inter_600SemiBold",
     color: "#FFFFFF",
+  },
+  modelCard: {
+    backgroundColor: Colors.dark.card,
+    marginHorizontal: 8,
+    marginTop: 8,
+    borderRadius: 8,
+    padding: 12,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: Colors.dark.accent,
+  },
+  modelTitle: {
+    fontSize: 13,
+    fontFamily: "Inter_700Bold",
+    color: Colors.dark.text,
+    marginBottom: 6,
+  },
+  modelText: {
+    fontSize: 12,
+    fontFamily: "Inter_400Regular",
+    color: Colors.dark.textSecondary,
+    lineHeight: 17,
+  },
+  modelStatsRow: {
+    flexDirection: "row",
+    gap: 8,
+    marginTop: 10,
+  },
+  modelStat: {
+    flex: 1,
+    backgroundColor: Colors.dark.surfaceSecondary,
+    borderRadius: 6,
+    paddingVertical: 8,
+    alignItems: "center",
+  },
+  modelStatValue: {
+    fontSize: 15,
+    fontFamily: "Inter_700Bold",
+    color: Colors.dark.text,
+  },
+  modelStatLabel: {
+    fontSize: 10,
+    fontFamily: "Inter_400Regular",
+    color: Colors.dark.textSecondary,
+    marginTop: 2,
   },
 });

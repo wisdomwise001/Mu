@@ -88,10 +88,313 @@ export async function registerRoutes(app: Express): Promise<Server> {
     "/api/event/:eventId/lineups",
     async (req: Request, res: Response) => {
       try {
-        const data = await fetchSofaScore(
-          `/event/${req.params.eventId}/lineups`,
+        const { eventId } = req.params;
+        const [eventResult, currentLineupsResult] = await Promise.allSettled([
+          fetchSofaScore(`/event/${eventId}`),
+          fetchSofaScore(`/event/${eventId}/lineups`),
+        ]);
+
+        const eventData: any = eventResult.status === "fulfilled" ? eventResult.value : null;
+        const currentLineups: any = currentLineupsResult.status === "fulfilled" ? currentLineupsResult.value : null;
+        const event = eventData?.event;
+        const homeTeamId = Number(event?.homeTeam?.id);
+        const awayTeamId = Number(event?.awayTeam?.id);
+
+        const hasProviderLineup = (side: "home" | "away") =>
+          (currentLineups?.[side]?.players || []).some((entry: any) => !entry.substitute);
+
+        if (!event || !homeTeamId || !awayTeamId || (hasProviderLineup("home") && hasProviderLineup("away"))) {
+          return res.json(currentLineups || { confirmed: false, home: { players: [] }, away: { players: [] } });
+        }
+
+        const [homeEventsResult, awayEventsResult] = await Promise.allSettled([
+          fetchSofaScore(`/team/${homeTeamId}/events/last/0`),
+          fetchSofaScore(`/team/${awayTeamId}/events/last/0`),
+        ]);
+
+        const homeLast15: any[] = (homeEventsResult.status === "fulfilled" ? homeEventsResult.value?.events || [] : []).slice(0, 15);
+        const awayLast15: any[] = (awayEventsResult.status === "fulfilled" ? awayEventsResult.value?.events || [] : []).slice(0, 15);
+        const historicalEventIds = Array.from(
+          new Set([...homeLast15, ...awayLast15].map((pastEvent: any) => pastEvent.id).filter(Boolean)),
         );
-        res.json(data);
+        const historicalLineupResults = await Promise.allSettled(
+          historicalEventIds.map((id) => fetchSofaScore(`/event/${id}/lineups`)),
+        );
+        const lineupsByEventId = new Map<number, any>();
+        historicalEventIds.forEach((id, index) => {
+          const result = historicalLineupResults[index];
+          if (result.status === "fulfilled") lineupsByEventId.set(id, result.value);
+        });
+
+        type PlayerHistory = {
+          playerId: number;
+          name: string;
+          position: string;
+          appearances: number;
+          starts: number;
+          last5Appearances: number;
+          last5Starts: number;
+          weightedAppearances: number;
+          weightedStarts: number;
+          sameVenueStarts: number;
+          ratings: number[];
+          recentRatings: number[];
+          latestPlayer: any;
+          jerseyNumber?: number;
+        };
+
+        function getTeamSide(pastEvent: any, teamId: number): "home" | "away" | null {
+          if (pastEvent.homeTeam?.id === teamId) return "home";
+          if (pastEvent.awayTeam?.id === teamId) return "away";
+          return null;
+        }
+
+        function recencyWeight(index: number): number {
+          if (index < 5) return 3;
+          if (index < 10) return 2;
+          return 1;
+        }
+
+        function playerRole(position?: string): "keeper" | "defender" | "midfielder" | "attacker" {
+          const value = (position || "").toLowerCase();
+          if (value === "g" || value.includes("goal")) return "keeper";
+          if (value.startsWith("d")) return "defender";
+          if (value.startsWith("m")) return "midfielder";
+          return "attacker";
+        }
+
+        function round1(value: number): number {
+          return Math.round(value * 10) / 10;
+        }
+
+        function average(values: number[]): number | null {
+          return values.length > 0 ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
+        }
+
+        function readRating(entry: any): number | null {
+          const value = Number(entry.statistics?.rating ?? entry.avgRating);
+          return Number.isFinite(value) && value > 0 ? value : null;
+        }
+
+        function parseFormationParts(formation?: string): number[] {
+          return (formation || "")
+            .split("-")
+            .map((part) => Number(part.trim()))
+            .filter((value) => Number.isFinite(value) && value > 0);
+        }
+
+        function deriveFormationFromPlayers(players: any[]): string {
+          const defenders = players.filter((entry) => playerRole(entry.position) === "defender").length;
+          const midfielders = players.filter((entry) => playerRole(entry.position) === "midfielder").length;
+          const attackers = players.filter((entry) => playerRole(entry.position) === "attacker").length;
+          if (defenders && midfielders && attackers) return `${defenders}-${midfielders}-${attackers}`;
+          return "4-3-3";
+        }
+
+        function getUnavailableIds(side: "home" | "away"): Set<number> {
+          return new Set(
+            (currentLineups?.[side]?.missingPlayers || [])
+              .map((entry: any) => Number(entry.player?.id))
+              .filter(Boolean),
+          );
+        }
+
+        function collectTeamHistory(
+          events: any[],
+          teamId: number,
+          targetVenueSide: "home" | "away",
+        ): { history: Map<number, PlayerHistory>; formation: string; formationMatches: number } {
+          const history = new Map<number, PlayerHistory>();
+          const formationScores = new Map<string, { score: number; matches: number }>();
+
+          events.forEach((pastEvent, index) => {
+            const side = getTeamSide(pastEvent, teamId);
+            if (!side) return;
+            const lineup = lineupsByEventId.get(pastEvent.id)?.[side];
+            const players = lineup?.players || [];
+            const starters = players.filter((entry: any) => !entry.substitute);
+            const weight = recencyWeight(index);
+            const venueMultiplier = side === targetVenueSide ? 1.25 : 1;
+            const formation = lineup?.formation || deriveFormationFromPlayers(starters);
+
+            if (formation && starters.length >= 9) {
+              const current = formationScores.get(formation) || { score: 0, matches: 0 };
+              current.score += weight * venueMultiplier;
+              current.matches += 1;
+              formationScores.set(formation, current);
+            }
+
+            players.forEach((entry: any) => {
+              const playerId = Number(entry.player?.id);
+              if (!playerId) return;
+              const substitute = !!entry.substitute;
+              const current = history.get(playerId) || {
+                playerId,
+                name: entry.player?.shortName || entry.player?.name || "Player",
+                position: entry.position || entry.player?.position || "",
+                appearances: 0,
+                starts: 0,
+                last5Appearances: 0,
+                last5Starts: 0,
+                weightedAppearances: 0,
+                weightedStarts: 0,
+                sameVenueStarts: 0,
+                ratings: [],
+                recentRatings: [],
+                latestPlayer: entry.player,
+                jerseyNumber: entry.jerseyNumber || entry.player?.jerseyNumber,
+              };
+
+              current.appearances += 1;
+              current.weightedAppearances += weight;
+              if (!substitute) {
+                current.starts += 1;
+                current.weightedStarts += weight * venueMultiplier;
+                if (side === targetVenueSide) current.sameVenueStarts += 1;
+              }
+              if (index < 5) {
+                current.last5Appearances += 1;
+                if (!substitute) current.last5Starts += 1;
+              }
+              const rating = readRating(entry);
+              if (rating) {
+                current.ratings.push(rating);
+                if (index < 5) current.recentRatings.push(rating);
+              }
+              current.position = current.position || entry.position || entry.player?.position || "";
+              current.latestPlayer = entry.player || current.latestPlayer;
+              current.jerseyNumber = current.jerseyNumber || entry.jerseyNumber || entry.player?.jerseyNumber;
+              history.set(playerId, current);
+            });
+          });
+
+          const preferredFormation = Array.from(formationScores.entries()).sort((a, b) => b[1].score - a[1].score)[0];
+          return {
+            history,
+            formation: preferredFormation?.[0] || "4-3-3",
+            formationMatches: preferredFormation?.[1].matches || 0,
+          };
+        }
+
+        function buildLikelyLineup(side: "home" | "away", events: any[], teamId: number) {
+          const unavailableIds = getUnavailableIds(side);
+          const { history, formation, formationMatches } = collectTeamHistory(events, teamId, side);
+          const formationParts = parseFormationParts(formation);
+          const defenderCount = formationParts[0] || 4;
+          const attackerCount = formationParts.length > 1 ? formationParts[formationParts.length - 1] : 3;
+          const midfielderCount = Math.max(10 - defenderCount - attackerCount, 0);
+          const availablePlayers = Array.from(history.values()).filter((player) => !unavailableIds.has(player.playerId));
+          const matchesAnalyzed = events.length || 1;
+          const recentMatchCount = Math.min(5, matchesAnalyzed);
+
+          const predictedRating = (player: PlayerHistory) => {
+            const recentAverage = average(player.recentRatings);
+            const fullAverage = average(player.ratings);
+            if (recentAverage && fullAverage) return round1(recentAverage * 0.6 + fullAverage * 0.4);
+            if (recentAverage || fullAverage) return round1(recentAverage || fullAverage || 6);
+            const startRate = player.starts / matchesAnalyzed;
+            const recentStartRate = recentMatchCount > 0 ? player.last5Starts / recentMatchCount : 0;
+            return round1(Math.max(5.8, Math.min(7.4, 5.8 + startRate * 0.8 + recentStartRate * 0.8)));
+          };
+
+          const lineupScore = (player: PlayerHistory) => {
+            const rating = predictedRating(player);
+            const coreBonus = player.starts >= 12 ? 14 : player.starts >= 10 ? 8 : 0;
+            return (
+              player.weightedStarts * 4.5 +
+              player.last5Starts * 7 +
+              player.sameVenueStarts * 1.6 +
+              player.weightedAppearances * 0.8 +
+              rating * 2 +
+              coreBonus
+            );
+          };
+
+          const confidence = (player: PlayerHistory) => {
+            const startRate = player.starts / matchesAnalyzed;
+            const recentStartRate = recentMatchCount > 0 ? player.last5Starts / recentMatchCount : 0;
+            const score = startRate * 0.45 + recentStartRate * 0.4 + Math.min(1, player.sameVenueStarts / 5) * 0.15;
+            if (score >= 0.72 || player.starts >= 12) return "High";
+            if (score >= 0.42 || player.last5Starts >= 2) return "Medium";
+            return "Low";
+          };
+
+          const usedIds = new Set<number>();
+          const takeRole = (role: "keeper" | "defender" | "midfielder" | "attacker", count: number) => {
+            const selected = availablePlayers
+              .filter((player) => !usedIds.has(player.playerId) && playerRole(player.position) === role)
+              .sort((a, b) => lineupScore(b) - lineupScore(a))
+              .slice(0, count);
+            selected.forEach((player) => usedIds.add(player.playerId));
+            return selected;
+          };
+
+          const starters = [
+            ...takeRole("keeper", 1),
+            ...takeRole("defender", defenderCount),
+            ...takeRole("midfielder", midfielderCount),
+            ...takeRole("attacker", attackerCount),
+          ];
+
+          if (starters.length < 11) {
+            const fallbackPlayers = availablePlayers
+              .filter((player) => !usedIds.has(player.playerId))
+              .sort((a, b) => lineupScore(b) - lineupScore(a))
+              .slice(0, 11 - starters.length);
+            fallbackPlayers.forEach((player) => usedIds.add(player.playerId));
+            starters.push(...fallbackPlayers);
+          }
+
+          const substitutes = availablePlayers
+            .filter((player) => !usedIds.has(player.playerId))
+            .sort((a, b) => lineupScore(b) - lineupScore(a))
+            .slice(0, 12);
+
+          const toEntry = (player: PlayerHistory, substitute: boolean) => {
+            const rating = predictedRating(player);
+            return {
+              player: player.latestPlayer || { id: player.playerId, shortName: player.name, name: player.name },
+              position: player.position || "M",
+              substitute,
+              jerseyNumber: Number(player.jerseyNumber) || 0,
+              statistics: { rating },
+              avgRating: rating,
+              predictionConfidence: confidence(player),
+              likelyLineupReason: substitute
+                ? `Bench candidate: ${player.appearances}/15 appearances, ${player.last5Appearances}/5 recent appearances`
+                : player.starts >= 12
+                ? `Core starter: ${player.starts}/15 starts and available`
+                : player.last5Starts >= 3
+                ? `Recent starter: ${player.last5Starts}/5 starts and fits ${formation}`
+                : `Best available ${playerRole(player.position)} for ${formation}`,
+              lineupScore: round1(lineupScore(player)),
+            };
+          };
+
+          return {
+            formation,
+            players: [...starters.map((player) => toEntry(player, false)), ...substitutes.map((player) => toEntry(player, true))],
+            missingPlayers: currentLineups?.[side]?.missingPlayers || [],
+            isLikely: true,
+            lineupSource: "weighted_last_15_recent_5_availability_model",
+            predictionSummary: {
+              matchesAnalyzed: events.length,
+              formationMatches,
+              unavailableCount: unavailableIds.size,
+              method: "Last 15 weighted 3x/2x/1x, current venue formation preference, last 5 activity, injury/suspension removal, role-by-role selection",
+            },
+          };
+        }
+
+        const home = hasProviderLineup("home") ? currentLineups.home : buildLikelyLineup("home", homeLast15, homeTeamId);
+        const away = hasProviderLineup("away") ? currentLineups.away : buildLikelyLineup("away", awayLast15, awayTeamId);
+
+        res.json({
+          confirmed: hasProviderLineup("home") && hasProviderLineup("away") ? currentLineups?.confirmed ?? false : false,
+          home,
+          away,
+          source: "provider_lineups_with_weighted_likely_lineup_fallback",
+        });
       } catch (error: any) {
         res.status(500).json({ error: error.message });
       }
