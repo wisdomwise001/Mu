@@ -17,6 +17,7 @@ interface PlayerData {
   substitute?: boolean;
   jerseyNumber?: number;
   simulationMetrics?: PlayerMetrics | null;
+  likelyLineupReason?: string;
 }
 
 interface LineupTeam {
@@ -74,16 +75,36 @@ interface PhaseStrengths {
 interface SimulationMetricsResponse {
   home?: {
     formation?: string | null;
+    lineup?: LineupTeam & {
+      isLikely?: boolean;
+      lineupSource?: string;
+      unavailableCount?: number;
+      activeLast5Count?: number;
+    };
     players?: { playerId: number; metrics: PlayerMetrics }[];
     teamStrength?: number | null;
     phaseStrengths?: PhaseStrengths;
+    isLikelyLineup?: boolean;
+    lineupSource?: string;
+    unavailableCount?: number;
+    activeLast5Count?: number;
     matchesAnalyzed?: number;
   };
   away?: {
     formation?: string | null;
+    lineup?: LineupTeam & {
+      isLikely?: boolean;
+      lineupSource?: string;
+      unavailableCount?: number;
+      activeLast5Count?: number;
+    };
     players?: { playerId: number; metrics: PlayerMetrics }[];
     teamStrength?: number | null;
     phaseStrengths?: PhaseStrengths;
+    isLikelyLineup?: boolean;
+    lineupSource?: string;
+    unavailableCount?: number;
+    activeLast5Count?: number;
     matchesAnalyzed?: number;
   };
 }
@@ -203,11 +224,12 @@ function metricColor(value: number | null | undefined): string {
 }
 
 function mergeMetrics(team?: LineupTeam, metrics?: SimulationMetricsResponse["home"]): LineupTeam | undefined {
-  if (!team) return team;
+  const baseTeam = team?.players?.length ? team : metrics?.lineup;
+  if (!baseTeam) return baseTeam;
   const metricMap = new Map((metrics?.players || []).map((entry) => [entry.playerId, entry.metrics]));
   return {
-    ...team,
-    players: (team.players || []).map((player) => ({
+    ...baseTeam,
+    players: (baseTeam.players || []).map((player) => ({
       ...player,
       simulationMetrics: metricMap.get(Number(player.player?.id)) || null,
     })),
@@ -525,6 +547,7 @@ function StadiumSimulationTab({
   const homeStarters = useMemo(() => (enrichedHome?.players || []).filter((player) => !player.substitute).slice(0, 11), [enrichedHome]);
   const awayStarters = useMemo(() => (enrichedAway?.players || []).filter((player) => !player.substitute).slice(0, 11), [enrichedAway]);
   const hasLineups = homeRows.length > 0 || awayRows.length > 0;
+  const hasLikelyLineup = !!simulationMetrics?.home?.isLikelyLineup || !!simulationMetrics?.away?.isLikelyLineup;
   const venueLabel = [venue, city].filter(Boolean).join(" · ");
 
   if (isLoading || metricsLoading) {
@@ -557,12 +580,29 @@ function StadiumSimulationTab({
               <Text style={[styles.metaText, styles.predictedText]}>Predicted</Text>
             </View>
           )}
+          {hasLikelyLineup && (
+            <View style={[styles.metaPill, styles.predictedPill]}>
+              <Text style={[styles.metaText, styles.predictedText]}>Likely lineup</Text>
+            </View>
+          )}
           <View style={styles.metaPill}>
             <Text style={styles.metaText}>
               Last 15: {simulationMetrics?.home?.matchesAnalyzed || 0}/{simulationMetrics?.away?.matchesAnalyzed || 0}
             </Text>
           </View>
+          {hasLikelyLineup && (
+            <View style={styles.metaPill}>
+              <Text style={styles.metaText}>
+                Active last 5: {simulationMetrics?.home?.activeLast5Count || 0}/{simulationMetrics?.away?.activeLast5Count || 0}
+              </Text>
+            </View>
+          )}
         </View>
+        {hasLikelyLineup && (
+          <Text style={styles.likelyLineupText}>
+            No provider predicted XI found, so this likely lineup is inferred from the preferred formation in the last 15 matches, players active in the last 5, and available injury/suspension data.
+          </Text>
+        )}
       </View>
 
       <View style={styles.stadium}>
@@ -576,14 +616,14 @@ function StadiumSimulationTab({
             <View style={styles.pitchContent}>
               <View style={styles.teamHeader}>
                 <Text style={styles.awayLabel} numberOfLines={1}>{awayTeamName}</Text>
-                <Text style={styles.teamFormation}>{data?.away?.formation || ""}</Text>
+                <Text style={styles.teamFormation}>{enrichedAway?.formation || ""}</Text>
               </View>
               <FormationRows rows={awayRows} side="away" />
               <View style={styles.centerSpacer} />
               <FormationRows rows={homeRows} side="home" />
               <View style={styles.teamHeader}>
                 <Text style={styles.homeLabel} numberOfLines={1}>{homeTeamName}</Text>
-                <Text style={styles.teamFormation}>{data?.home?.formation || ""}</Text>
+                <Text style={styles.teamFormation}>{enrichedHome?.formation || ""}</Text>
               </View>
             </View>
           ) : (
@@ -688,6 +728,13 @@ const styles = StyleSheet.create({
   },
   predictedText: {
     color: Colors.dark.accent,
+  },
+  likelyLineupText: {
+    fontSize: 11,
+    fontFamily: "Inter_400Regular",
+    color: Colors.dark.textSecondary,
+    lineHeight: 16,
+    marginTop: 10,
   },
   stadium: {
     marginHorizontal: 8,

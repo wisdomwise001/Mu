@@ -146,7 +146,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
           recentRatings: number[];
           statTotals: Record<string, number>;
           statSamples: number;
+          last5Appearances: number;
+          last5Starts: number;
           lastPlayedTimestamp: number;
+          latestPlayer: any;
+          jerseyNumber?: number;
         };
 
         function getTeamSide(event: any, teamId: number): "home" | "away" | null {
@@ -180,6 +184,35 @@ export async function registerRoutes(app: Express): Promise<Server> {
           return values.length > 0 ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
         }
 
+        function parseFormationParts(formation?: string): number[] {
+          if (!formation) return [];
+          return formation
+            .split("-")
+            .map((part) => Number(part.trim()))
+            .filter((value) => Number.isFinite(value) && value > 0);
+        }
+
+        function deriveFormationFromPlayers(players: any[]): string {
+          const defenders = players.filter((entry) => playerRole(entry.position) === "defender").length;
+          const midfielders = players.filter((entry) => playerRole(entry.position) === "midfielder").length;
+          const attackers = players.filter((entry) => playerRole(entry.position) === "attacker").length;
+          if (defenders && midfielders && attackers) return `${defenders}-${midfielders}-${attackers}`;
+          return "4-3-3";
+        }
+
+        function getMissingPlayerIds(side: "home" | "away"): Set<number> {
+          const missingPlayers = currentLineups?.[side]?.missingPlayers || [];
+          return new Set(
+            missingPlayers
+              .filter((entry: any) => {
+                const text = `${entry.type || ""} ${entry.reason || ""}`.toLowerCase();
+                return text.includes("injur") || text.includes("suspend") || text.includes("doubt") || text.includes("unavailable");
+              })
+              .map((entry: any) => Number(entry.player?.id))
+              .filter(Boolean),
+          );
+        }
+
         function collectTeamHistory(events: any[], teamId: number): Map<number, PlayerHistory> {
           const history = new Map<number, PlayerHistory>();
 
@@ -204,11 +237,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
                 recentRatings: [],
                 statTotals: {},
                 statSamples: 0,
+                last5Appearances: 0,
+                last5Starts: 0,
                 lastPlayedTimestamp: 0,
+                latestPlayer: entry.player,
+                jerseyNumber: entry.jerseyNumber,
               };
 
               current.appearances += 1;
               if (!entry.substitute) current.starts += 1;
+              if (eventIndex < 5) {
+                current.last5Appearances += 1;
+                if (!entry.substitute) current.last5Starts += 1;
+              }
               if (entry.statistics) {
                 current.statSamples += 1;
                 Object.entries(entry.statistics).forEach(([key, rawValue]) => {
@@ -225,6 +266,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
                 if (eventIndex < 5) current.recentRatings.push(rating);
               }
               current.position = current.position || entry.position || "";
+              current.latestPlayer = current.latestPlayer || entry.player;
+              current.jerseyNumber = current.jerseyNumber || entry.jerseyNumber;
               current.lastPlayedTimestamp = Math.max(current.lastPlayedTimestamp, Number(event.startTimestamp) || 0);
               history.set(playerId, current);
             });
@@ -397,8 +440,110 @@ export async function registerRoutes(app: Express): Promise<Server> {
           return metrics.attackStrength || metrics.overall;
         }
 
-        function enrichSide(side: "home" | "away", history: Map<number, PlayerHistory>) {
-          const team = currentLineups?.[side];
+        function preferredFormation(events: any[], teamId: number): string {
+          const formationScores = new Map<string, number>();
+          events.forEach((event: any, index: number) => {
+            const side = getTeamSide(event, teamId);
+            if (!side) return;
+            const lineup = lineupsByEventId.get(event.id)?.[side];
+            const starters = (lineup?.players || []).filter((entry: any) => !entry.substitute);
+            const formation = lineup?.formation || deriveFormationFromPlayers(starters);
+            if (!formation || starters.length < 9) return;
+            const recencyWeight = Math.max(1, 15 - index);
+            formationScores.set(formation, (formationScores.get(formation) || 0) + recencyWeight);
+          });
+
+          return Array.from(formationScores.entries()).sort((a, b) => b[1] - a[1])[0]?.[0] || "4-3-3";
+        }
+
+        function buildLikelyLineup(
+          side: "home" | "away",
+          events: any[],
+          teamId: number,
+          history: Map<number, PlayerHistory>,
+        ) {
+          const formation = preferredFormation(events, teamId);
+          const formationParts = parseFormationParts(formation);
+          const defenderCount = formationParts[0] || 4;
+          const attackerCount = formationParts.length > 1 ? formationParts[formationParts.length - 1] : 3;
+          const midfielderCount = Math.max(10 - defenderCount - attackerCount, 0);
+          const missingIds = getMissingPlayerIds(side);
+          const activeLast5Ids = new Set(
+            Array.from(history.values())
+              .filter((player) => player.last5Appearances > 0)
+              .map((player) => player.playerId),
+          );
+          const candidates = Array.from(history.values()).filter((player) => !missingIds.has(player.playerId));
+          const ratingAvg = (player: PlayerHistory) =>
+            player.ratings.length > 0 ? player.ratings.reduce((sum, rating) => sum + rating, 0) / player.ratings.length : 6;
+          const candidateScore = (player: PlayerHistory) =>
+            player.starts * 2.2 +
+            player.appearances * 0.8 +
+            player.last5Starts * 4 +
+            player.last5Appearances * 2.2 +
+            ratingAvg(player) * 2 +
+            (activeLast5Ids.has(player.playerId) ? 5 : 0);
+          const usedIds = new Set<number>();
+          const takeRole = (role: "keeper" | "defender" | "midfielder" | "attacker", count: number) => {
+            const selected = candidates
+              .filter((player) => !usedIds.has(player.playerId) && playerRole(player.position) === role)
+              .sort((a, b) => candidateScore(b) - candidateScore(a))
+              .slice(0, count);
+            selected.forEach((player) => usedIds.add(player.playerId));
+            return selected;
+          };
+
+          const picked = [
+            ...takeRole("keeper", 1),
+            ...takeRole("defender", defenderCount),
+            ...takeRole("midfielder", midfielderCount),
+            ...takeRole("attacker", attackerCount),
+          ];
+          const fallbackNeeded = Math.max(0, 11 - picked.length);
+          if (fallbackNeeded > 0) {
+            const extra = candidates
+              .filter((player) => !usedIds.has(player.playerId))
+              .sort((a, b) => candidateScore(b) - candidateScore(a))
+              .slice(0, fallbackNeeded);
+            extra.forEach((player) => usedIds.add(player.playerId));
+            picked.push(...extra);
+          }
+
+          const substitutes = candidates
+            .filter((player) => !usedIds.has(player.playerId))
+            .sort((a, b) => candidateScore(b) - candidateScore(a))
+            .slice(0, 12);
+
+          const toEntry = (player: PlayerHistory, substitute: boolean) => ({
+            player: player.latestPlayer || { id: player.playerId, shortName: player.name, name: player.name },
+            position: player.position || "M",
+            substitute,
+            jerseyNumber: player.jerseyNumber || 0,
+            statistics: {
+              rating: ratingAvg(player),
+            },
+            likelyLineupReason: substitute
+              ? "Bench option from last 15 match involvement"
+              : player.last5Appearances > 0
+              ? "Active in last 5 and fits preferred formation"
+              : "Best available historical fit for preferred formation",
+          });
+
+          return {
+            formation,
+            players: [...picked.map((player) => toEntry(player, false)), ...substitutes.map((player) => toEntry(player, true))],
+            missingPlayers: currentLineups?.[side]?.missingPlayers || [],
+            isLikely: true,
+            lineupSource: "preferred_formation_last_15_active_last_5",
+            unavailableCount: missingIds.size,
+            activeLast5Count: activeLast5Ids.size,
+          };
+        }
+
+        function enrichSide(side: "home" | "away", history: Map<number, PlayerHistory>, events: any[], teamId: number) {
+          const existingTeam = currentLineups?.[side];
+          const hasProviderLineup = (existingTeam?.players || []).some((entry: any) => !entry.substitute);
+          const team = hasProviderLineup ? existingTeam : buildLikelyLineup(side, events, teamId, history);
           const players = (team?.players || []).map((entry: any) => {
             const playerId = Number(entry.player?.id);
             return {
@@ -448,6 +593,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
           return {
             formation: team?.formation || null,
+            lineup: team,
+            lineupSource: hasProviderLineup ? "provider_predicted_or_confirmed" : team?.lineupSource,
+            isLikelyLineup: !hasProviderLineup,
+            unavailableCount: team?.unavailableCount || 0,
+            activeLast5Count: team?.activeLast5Count || 0,
             players,
             teamStrength,
             phaseStrengths: {
@@ -465,10 +615,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
         const awayHistory = collectTeamHistory(awayLast15, awayTeamId);
 
         res.json({
-          home: enrichSide("home", homeHistory),
-          away: enrichSide("away", awayHistory),
+          home: enrichSide("home", homeHistory, homeLast15, homeTeamId),
+          away: enrichSide("away", awayHistory, awayLast15, awayTeamId),
           confirmed: currentLineups?.confirmed ?? null,
-          source: "last_15_role_based_lineup_statistics",
+          source: "last_15_role_based_lineup_statistics_with_likely_lineup_fallback",
         });
       } catch (error: any) {
         console.error("Error building player simulation:", error.message);
