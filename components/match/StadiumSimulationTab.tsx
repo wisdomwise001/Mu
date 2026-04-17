@@ -116,6 +116,14 @@ interface LiveEvent {
   type: "attack" | "goal" | "save" | "control";
 }
 
+interface ScorelineResult {
+  score: string;
+  homeScore: number;
+  awayScore: number;
+  count: number;
+  percent: number;
+}
+
 interface SimulationState {
   running: boolean;
   minute: number;
@@ -124,6 +132,8 @@ interface SimulationState {
   possession: number;
   ballY: number;
   events: LiveEvent[];
+  bulkStatus: "idle" | "countdown" | "running" | "complete";
+  topScorelines: ScorelineResult[];
 }
 
 function getPlayerName(player: PlayerData): string {
@@ -312,6 +322,90 @@ function createLiveEvent(
   return { minute, team, type, text: textByType[type] };
 }
 
+function buildSimulationContext({
+  homePlayers,
+  awayPlayers,
+  homeStrength,
+  awayStrength,
+  homePhases,
+  awayPhases,
+}: {
+  homePlayers: PlayerData[];
+  awayPlayers: PlayerData[];
+  homeStrength?: number | null;
+  awayStrength?: number | null;
+  homePhases?: PhaseStrengths;
+  awayPhases?: PhaseStrengths;
+}) {
+  const homePower = ((homePhases?.attackStrength || homeStrength || 6.4) * 0.55) + ((homePhases?.midfieldStrength || homeStrength || 6.4) * 0.25) + ((homePhases?.fullbackStrength || homeStrength || 6.4) * 0.2);
+  const awayPower = ((awayPhases?.attackStrength || awayStrength || 6.4) * 0.55) + ((awayPhases?.midfieldStrength || awayStrength || 6.4) * 0.25) + ((awayPhases?.fullbackStrength || awayStrength || 6.4) * 0.2);
+  const totalPower = Math.max(homePower + awayPower, 1);
+  const homeChance = homePower / totalPower;
+
+  const homeAttackScores = homePlayers.map((player) => Math.max(getPlayerScore(player), getRoleStrength(player)));
+  const homeDefenseScores = homePlayers.map((player) => Math.max(getPlayerScore(player), getRoleStrength(player)));
+  const awayAttackScores = awayPlayers.map((player) => Math.max(getPlayerScore(player), getRoleStrength(player)));
+  const awayDefenseScores = awayPlayers.map((player) => Math.max(getPlayerScore(player), getRoleStrength(player)));
+
+  return {
+    homeChance,
+    possessionTarget: Math.round(homeChance * 100),
+    homeAttackScores: homeAttackScores.length ? homeAttackScores : [6],
+    homeDefenseScores: homeDefenseScores.length ? homeDefenseScores : [6],
+    awayAttackScores: awayAttackScores.length ? awayAttackScores : [6],
+    awayDefenseScores: awayDefenseScores.length ? awayDefenseScores : [6],
+    homeDefensiveBase: ((homePhases?.defensiveStrength || homeStrength || 6.4) * 0.5) + ((homePhases?.keeperStrength || homeStrength || 6.4) * 0.3) + ((homePhases?.midfieldStrength || homeStrength || 6.4) * 0.2),
+    awayDefensiveBase: ((awayPhases?.defensiveStrength || awayStrength || 6.4) * 0.5) + ((awayPhases?.keeperStrength || awayStrength || 6.4) * 0.3) + ((awayPhases?.midfieldStrength || awayStrength || 6.4) * 0.2),
+  };
+}
+
+function simulateMatchScoreline(context: ReturnType<typeof buildSimulationContext>) {
+  let homeScore = 0;
+  let awayScore = 0;
+
+  for (let minute = 3; minute <= 90; minute += 3) {
+    const attackingTeam: "home" | "away" = Math.random() <= context.homeChance ? "home" : "away";
+    const attackScores = attackingTeam === "home" ? context.homeAttackScores : context.awayAttackScores;
+    const defenseScores = attackingTeam === "home" ? context.awayDefenseScores : context.homeDefenseScores;
+    const attackerScore = attackScores[Math.floor(Math.random() * attackScores.length)] || 6;
+    const defenderScore = defenseScores[Math.floor(Math.random() * defenseScores.length)] || 6;
+    const defensiveWall = attackingTeam === "home"
+      ? context.awayDefensiveBase || defenderScore
+      : context.homeDefensiveBase || defenderScore;
+    const goalChance = clampForSimulation(0.05 + (attackerScore - defensiveWall) * 0.025 + (attackingTeam === "home" ? 0.01 : 0), 0.025, 0.17);
+
+    if (Math.random() < goalChance) {
+      if (attackingTeam === "home") homeScore += 1;
+      else awayScore += 1;
+    }
+  }
+
+  return { homeScore, awayScore };
+}
+
+function runBulkScorelineSimulation(context: ReturnType<typeof buildSimulationContext>, totalRuns: number): ScorelineResult[] {
+  const counts = new Map<string, { homeScore: number; awayScore: number; count: number }>();
+
+  for (let index = 0; index < totalRuns; index += 1) {
+    const { homeScore, awayScore } = simulateMatchScoreline(context);
+    const key = `${homeScore}-${awayScore}`;
+    const current = counts.get(key) || { homeScore, awayScore, count: 0 };
+    current.count += 1;
+    counts.set(key, current);
+  }
+
+  return Array.from(counts.entries())
+    .map(([score, entry]) => ({
+      score,
+      homeScore: entry.homeScore,
+      awayScore: entry.awayScore,
+      count: entry.count,
+      percent: (entry.count / totalRuns) * 100,
+    }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 20);
+}
+
 function SimulationPanel({
   homeTeamName,
   awayTeamName,
@@ -339,7 +433,22 @@ function SimulationPanel({
     possession: 50,
     ballY: 50,
     events: [],
+    bulkStatus: "idle",
+    topScorelines: [],
   });
+
+  const simulationContext = useMemo(
+    () =>
+      buildSimulationContext({
+        homePlayers,
+        awayPlayers,
+        homeStrength,
+        awayStrength,
+        homePhases,
+        awayPhases,
+      }),
+    [awayPhases, awayPlayers, awayStrength, homePhases, homePlayers, homeStrength],
+  );
 
   const resetSimulation = useCallback(() => {
     setState({
@@ -350,6 +459,8 @@ function SimulationPanel({
       possession: 50,
       ballY: 50,
       events: [],
+      bulkStatus: "idle",
+      topScorelines: [],
     });
   }, []);
 
@@ -357,6 +468,8 @@ function SimulationPanel({
     setState((current) => ({
       ...current,
       running: true,
+      bulkStatus: "countdown",
+      topScorelines: [],
       minute: current.minute >= 90 ? 0 : current.minute,
       homeScore: current.minute >= 90 ? 0 : current.homeScore,
       awayScore: current.minute >= 90 ? 0 : current.awayScore,
@@ -373,11 +486,7 @@ function SimulationPanel({
         }
 
         const nextMinute = Math.min(90, current.minute + 3);
-        const homePower = ((homePhases?.attackStrength || homeStrength || 6.4) * 0.55) + ((homePhases?.midfieldStrength || homeStrength || 6.4) * 0.25) + ((homePhases?.fullbackStrength || homeStrength || 6.4) * 0.2);
-        const awayPower = ((awayPhases?.attackStrength || awayStrength || 6.4) * 0.55) + ((awayPhases?.midfieldStrength || awayStrength || 6.4) * 0.25) + ((awayPhases?.fullbackStrength || awayStrength || 6.4) * 0.2);
-        const totalPower = Math.max(homePower + awayPower, 1);
-        const homeChance = homePower / totalPower;
-        const attackingTeam: "home" | "away" = Math.random() <= homeChance ? "home" : "away";
+        const attackingTeam: "home" | "away" = Math.random() <= simulationContext.homeChance ? "home" : "away";
         const attackers = attackingTeam === "home" ? homePlayers : awayPlayers;
         const defenders = attackingTeam === "home" ? awayPlayers : homePlayers;
         const attacker =
@@ -386,8 +495,7 @@ function SimulationPanel({
           defenders[Math.floor(Math.random() * Math.max(defenders.length, 1))] || defenders[0];
         const attackerScore = Math.max(getPlayerScore(attacker), getRoleStrength(attacker));
         const defenderScore = Math.max(getPlayerScore(defender), getRoleStrength(defender));
-        const defendingPhases = attackingTeam === "home" ? awayPhases : homePhases;
-        const defensiveWall = ((defendingPhases?.defensiveStrength || defenderScore) * 0.5) + ((defendingPhases?.keeperStrength || defenderScore) * 0.3) + ((defendingPhases?.midfieldStrength || defenderScore) * 0.2);
+        const defensiveWall = attackingTeam === "home" ? simulationContext.awayDefensiveBase : simulationContext.homeDefensiveBase;
         const goalChance = clampForSimulation(0.05 + (attackerScore - defensiveWall) * 0.025 + (attackingTeam === "home" ? 0.01 : 0), 0.025, 0.17);
         const roll = Math.random();
         const type: LiveEvent["type"] =
@@ -399,10 +507,10 @@ function SimulationPanel({
           getPlayerName(attacker),
           getPlayerName(defender),
         );
-        const possessionTarget = Math.round(homeChance * 100);
-        const possession = Math.round(current.possession * 0.7 + possessionTarget * 0.3 + (Math.random() * 8 - 4));
+        const possession = Math.round(current.possession * 0.7 + simulationContext.possessionTarget * 0.3 + (Math.random() * 8 - 4));
 
         return {
+          ...current,
           running: nextMinute < 90,
           minute: nextMinute,
           homeScore: current.homeScore + (type === "goal" && attackingTeam === "home" ? 1 : 0),
@@ -415,7 +523,20 @@ function SimulationPanel({
     }, 900);
 
     return () => clearInterval(timer);
-  }, [awayPhases, awayPlayers, awayStrength, homePhases, homePlayers, homeStrength, state.running]);
+  }, [awayPlayers, homePlayers, simulationContext, state.running]);
+
+  useEffect(() => {
+    if (state.bulkStatus !== "countdown" || state.running || state.minute < 90) return undefined;
+    const timer = setTimeout(() => {
+      setState((current) => ({ ...current, bulkStatus: "running" }));
+      setTimeout(() => {
+        const topScorelines = runBulkScorelineSimulation(simulationContext, 1_000_000);
+        setState((current) => ({ ...current, bulkStatus: "complete", topScorelines }));
+      }, 30);
+    }, 250);
+
+    return () => clearTimeout(timer);
+  }, [simulationContext, state.bulkStatus, state.minute, state.running]);
 
   const canSimulate = homePlayers.length > 0 && awayPlayers.length > 0;
 
@@ -444,13 +565,13 @@ function SimulationPanel({
       </View>
       <View style={styles.buttonRow}>
         <TouchableOpacity
-          style={[styles.simulateButton, (!canSimulate || state.running) && styles.buttonDisabled]}
+          style={[styles.simulateButton, (!canSimulate || state.running || state.bulkStatus === "running") && styles.buttonDisabled]}
           onPress={startSimulation}
-          disabled={!canSimulate || state.running}
+          disabled={!canSimulate || state.running || state.bulkStatus === "running"}
           activeOpacity={0.85}
         >
           <Text style={styles.simulateButtonText}>
-            {state.running ? "Simulating..." : state.minute >= 90 ? "Simulate again" : "Simulate"}
+            {state.running ? "Counting down..." : state.bulkStatus === "running" ? "Running 1,000,000..." : state.minute >= 90 ? "Simulate again" : "Simulate"}
           </Text>
         </TouchableOpacity>
         <TouchableOpacity style={styles.resetButton} onPress={resetSimulation} activeOpacity={0.85}>
@@ -466,6 +587,29 @@ function SimulationPanel({
             >
               {event.minute}' {event.team === "home" ? homeTeamName : awayTeamName}: {event.text}
             </Text>
+          ))}
+        </View>
+      )}
+      {state.bulkStatus === "running" && (
+        <View style={styles.scorelineCard}>
+          <ActivityIndicator size="small" color={Colors.dark.accent} />
+          <Text style={styles.scorelineLoadingText}>Running 1,000,000 full match simulations...</Text>
+        </View>
+      )}
+      {state.topScorelines.length > 0 && (
+        <View style={styles.scorelineCard}>
+          <Text style={styles.scorelineTitle}>Top 20 score results from 1,000,000 simulations</Text>
+          {state.topScorelines.map((result, index) => (
+            <View key={result.score} style={styles.scorelineRow}>
+              <Text style={styles.scorelineRank}>{index + 1}</Text>
+              <Text style={styles.scorelineScore}>
+                {homeTeamName} {result.homeScore} - {result.awayScore} {awayTeamName}
+              </Text>
+              <View style={styles.scorelineMeta}>
+                <Text style={styles.scorelinePercent}>{result.percent.toFixed(2)}%</Text>
+                <Text style={styles.scorelineCount}>{result.count.toLocaleString()}</Text>
+              </View>
+            </View>
           ))}
         </View>
       )}
@@ -1119,5 +1263,56 @@ const styles = StyleSheet.create({
   goalEventText: {
     color: Colors.dark.text,
     fontFamily: "Inter_700Bold",
+  },
+  scorelineCard: {
+    marginTop: 12,
+    borderRadius: 10,
+    backgroundColor: Colors.dark.surfaceSecondary,
+    padding: 12,
+    gap: 10,
+  },
+  scorelineLoadingText: {
+    fontSize: 12,
+    fontFamily: "Inter_600SemiBold",
+    color: Colors.dark.textSecondary,
+    textAlign: "center",
+  },
+  scorelineTitle: {
+    fontSize: 13,
+    fontFamily: "Inter_700Bold",
+    color: Colors.dark.text,
+  },
+  scorelineRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingTop: 8,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: Colors.dark.border,
+  },
+  scorelineRank: {
+    width: 22,
+    fontSize: 11,
+    fontFamily: "Inter_700Bold",
+    color: Colors.dark.textTertiary,
+  },
+  scorelineScore: {
+    flex: 1,
+    fontSize: 12,
+    fontFamily: "Inter_600SemiBold",
+    color: Colors.dark.text,
+  },
+  scorelineMeta: {
+    alignItems: "flex-end",
+  },
+  scorelinePercent: {
+    fontSize: 12,
+    fontFamily: "Inter_700Bold",
+    color: Colors.dark.accent,
+  },
+  scorelineCount: {
+    fontSize: 10,
+    fontFamily: "Inter_400Regular",
+    color: Colors.dark.textTertiary,
   },
 });
