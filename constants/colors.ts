@@ -22,6 +22,11 @@ const Colors = {
     dateActiveText: "#FFFFFF",
     dateInactiveText: "#8C8D96",
     tabBarBg: "#15161B",
+    pitch: "#0F6B3D",
+    pitchDark: "#0B5430",
+    pitchLine: "rgba(255, 255, 255, 0.42)",
+    homeKit: "#3D7BF4",
+    awayKit: "#E5383B",
   },
 };
 
