@@ -216,6 +216,8 @@ export default function MatchDetailScreen() {
             eventId={eventId}
             homeTeamName={homeTeamName}
             awayTeamName={awayTeamName}
+            homeTeamId={homeTeamId}
+            awayTeamId={awayTeamId}
             venue={venue}
             city={city}
           />

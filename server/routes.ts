@@ -99,6 +99,210 @@ export async function registerRoutes(app: Express): Promise<Server> {
   );
 
   app.get(
+    "/api/event/:eventId/player-simulation",
+    async (req: Request, res: Response) => {
+      try {
+        const { eventId } = req.params;
+        const homeTeamId = Number(req.query.homeTeamId);
+        const awayTeamId = Number(req.query.awayTeamId);
+
+        if (!homeTeamId || !awayTeamId) {
+          return res.status(400).json({ error: "homeTeamId and awayTeamId are required" });
+        }
+
+        const [currentLineupsResult, homeEventsResult, awayEventsResult] = await Promise.allSettled([
+          fetchSofaScore(`/event/${eventId}/lineups`),
+          fetchSofaScore(`/team/${homeTeamId}/events/last/0`),
+          fetchSofaScore(`/team/${awayTeamId}/events/last/0`),
+        ]);
+
+        const currentLineups: any = currentLineupsResult.status === "fulfilled" ? currentLineupsResult.value : null;
+        const homeEvents: any[] = homeEventsResult.status === "fulfilled" ? homeEventsResult.value?.events || [] : [];
+        const awayEvents: any[] = awayEventsResult.status === "fulfilled" ? awayEventsResult.value?.events || [] : [];
+        const homeLast15 = homeEvents.slice(0, 15);
+        const awayLast15 = awayEvents.slice(0, 15);
+
+        const historicalEventIds = Array.from(
+          new Set([...homeLast15, ...awayLast15].map((event: any) => event.id).filter(Boolean)),
+        );
+
+        const historicalLineupResults = await Promise.allSettled(
+          historicalEventIds.map((id) => fetchSofaScore(`/event/${id}/lineups`)),
+        );
+
+        const lineupsByEventId = new Map<number, any>();
+        historicalEventIds.forEach((id, index) => {
+          const result = historicalLineupResults[index];
+          if (result.status === "fulfilled") lineupsByEventId.set(id, result.value);
+        });
+
+        type PlayerHistory = {
+          playerId: number;
+          name: string;
+          position: string;
+          appearances: number;
+          starts: number;
+          ratings: number[];
+          recentRatings: number[];
+          lastPlayedTimestamp: number;
+        };
+
+        function getTeamSide(event: any, teamId: number): "home" | "away" | null {
+          if (event.homeTeam?.id === teamId) return "home";
+          if (event.awayTeam?.id === teamId) return "away";
+          return null;
+        }
+
+        function clamp(value: number, min: number, max: number): number {
+          return Math.max(min, Math.min(max, value));
+        }
+
+        function round1(value: number): number {
+          return Math.round(value * 10) / 10;
+        }
+
+        function collectTeamHistory(events: any[], teamId: number): Map<number, PlayerHistory> {
+          const history = new Map<number, PlayerHistory>();
+
+          events.forEach((event: any, eventIndex: number) => {
+            const side = getTeamSide(event, teamId);
+            if (!side) return;
+
+            const lineup = lineupsByEventId.get(event.id);
+            const players = lineup?.[side]?.players || [];
+
+            players.forEach((entry: any) => {
+              const playerId = Number(entry.player?.id);
+              if (!playerId) return;
+
+              const current = history.get(playerId) || {
+                playerId,
+                name: entry.player?.shortName || entry.player?.name || "Player",
+                position: entry.position || "",
+                appearances: 0,
+                starts: 0,
+                ratings: [],
+                recentRatings: [],
+                lastPlayedTimestamp: 0,
+              };
+
+              current.appearances += 1;
+              if (!entry.substitute) current.starts += 1;
+              const rating = Number(entry.statistics?.rating);
+              if (Number.isFinite(rating) && rating > 0) {
+                current.ratings.push(rating);
+                if (eventIndex < 5) current.recentRatings.push(rating);
+              }
+              current.position = current.position || entry.position || "";
+              current.lastPlayedTimestamp = Math.max(current.lastPlayedTimestamp, Number(event.startTimestamp) || 0);
+              history.set(playerId, current);
+            });
+          });
+
+          return history;
+        }
+
+        function calculateMetrics(player: any, history?: PlayerHistory) {
+          const currentRating = Number(player.statistics?.rating);
+          const ratings = history?.ratings || [];
+          const recentRatings = history?.recentRatings || [];
+          const avgRating =
+            ratings.length > 0
+              ? ratings.reduce((sum, rating) => sum + rating, 0) / ratings.length
+              : Number.isFinite(currentRating) && currentRating > 0
+              ? currentRating
+              : null;
+          const recentAvg =
+            recentRatings.length > 0
+              ? recentRatings.reduce((sum, rating) => sum + rating, 0) / recentRatings.length
+              : avgRating;
+          const appearances = history?.appearances || 0;
+          const starts = history?.starts || 0;
+          const consistency =
+            ratings.length > 1
+              ? 10 - clamp(
+                  Math.sqrt(
+                    ratings.reduce((sum, rating) => sum + Math.pow(rating - (avgRating || rating), 2), 0) /
+                      ratings.length,
+                  ) * 2,
+                  0,
+                  3,
+                )
+              : ratings.length === 1
+              ? 7
+              : 5;
+          const performance = avgRating ? clamp(avgRating, 4, 10) : 0;
+          const experience = clamp(4 + (appearances / 15) * 4 + (starts / 15) * 2, appearances > 0 ? 4 : 0, 10);
+          const intelligence = avgRating
+            ? clamp(avgRating * 0.62 + consistency * 0.22 + (recentAvg || avgRating) * 0.16, 4, 10)
+            : 0;
+          const decision = avgRating
+            ? clamp((recentAvg || avgRating) * 0.42 + consistency * 0.32 + experience * 0.26, 4, 10)
+            : 0;
+          const overall = avgRating
+            ? clamp(performance * 0.42 + intelligence * 0.22 + decision * 0.2 + experience * 0.16, 4, 10)
+            : 0;
+
+          return {
+            overall: overall ? round1(overall) : null,
+            experience: experience ? round1(experience) : null,
+            decision: decision ? round1(decision) : null,
+            intelligence: intelligence ? round1(intelligence) : null,
+            performance: performance ? round1(performance) : null,
+            appearances,
+            starts,
+            averageRating: avgRating ? round1(avgRating) : null,
+            dataConfidence: ratings.length >= 8 ? "High" : ratings.length >= 3 ? "Medium" : ratings.length > 0 ? "Low" : "Unavailable",
+          };
+        }
+
+        function enrichSide(side: "home" | "away", history: Map<number, PlayerHistory>) {
+          const team = currentLineups?.[side];
+          const players = (team?.players || []).map((entry: any) => {
+            const playerId = Number(entry.player?.id);
+            return {
+              playerId,
+              metrics: calculateMetrics(entry, history.get(playerId)),
+            };
+          });
+
+          const starters = players.filter((entry: any) => {
+            const original = (team?.players || []).find((player: any) => Number(player.player?.id) === entry.playerId);
+            return original && !original.substitute;
+          });
+          const availableRatings = starters
+            .map((entry: any) => entry.metrics.overall)
+            .filter((rating: number | null) => typeof rating === "number") as number[];
+          const teamStrength =
+            availableRatings.length > 0
+              ? round1(availableRatings.reduce((sum, rating) => sum + rating, 0) / availableRatings.length)
+              : null;
+
+          return {
+            formation: team?.formation || null,
+            players,
+            teamStrength,
+            matchesAnalyzed: side === "home" ? homeLast15.length : awayLast15.length,
+          };
+        }
+
+        const homeHistory = collectTeamHistory(homeLast15, homeTeamId);
+        const awayHistory = collectTeamHistory(awayLast15, awayTeamId);
+
+        res.json({
+          home: enrichSide("home", homeHistory),
+          away: enrichSide("away", awayHistory),
+          confirmed: currentLineups?.confirmed ?? null,
+          source: "last_15_lineup_ratings",
+        });
+      } catch (error: any) {
+        console.error("Error building player simulation:", error.message);
+        res.status(500).json({ error: error.message });
+      }
+    },
+  );
+
+  app.get(
     "/api/event/:eventId/statistics",
     async (req: Request, res: Response) => {
       try {
