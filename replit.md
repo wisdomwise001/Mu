@@ -8,4 +8,5 @@
 - Player simulation metrics include role-based strengths from last-15 player stats: defensive, attack, midfield, goalkeeper, and full-back/wing-back strength.
 - Lineups tab consumes SofaScore `/event/:eventId/lineups` missingPlayers data and renders injury/suspension reports per team.
 - If SofaScore has no predicted XI, `/api/event/:eventId/lineups` now builds likely lineups from each team's last 15 match lineups using a weighted 3x/2x/1x recency model, preferred formation/venue context, last-5 player activity, injury/suspension filtering, and predicted player ratings.
+- Main sports fixture screens now re-filter provider events by the selected local date, include quick search across teams/leagues/countries, and use reduced mobile web top spacing.
 - Metro ignores `.local` and `.cache` runtime folders to avoid watcher crashes from transient Replit state files.

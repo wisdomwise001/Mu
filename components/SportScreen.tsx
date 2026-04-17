@@ -2,12 +2,14 @@ import React, { useState, useMemo, useCallback } from "react";
 import {
   View,
   Text,
+  TextInput,
   FlatList,
   ActivityIndicator,
   RefreshControl,
   StyleSheet,
   Platform,
   TouchableOpacity,
+  useWindowDimensions,
 } from "react-native";
 import { useQuery } from "@tanstack/react-query";
 import { format } from "date-fns";
@@ -34,7 +36,9 @@ interface SportScreenProps {
 export default function SportScreen({ sport, title }: SportScreenProps) {
   const [selectedDate, setSelectedDate] = useState(new Date());
   const [activeFilter, setActiveFilter] = useState<FilterType>("all");
+  const [searchQuery, setSearchQuery] = useState("");
   const insets = useSafeAreaInsets();
+  const { width } = useWindowDimensions();
 
   const dateStr = format(selectedDate, "yyyy-MM-dd");
 
@@ -51,25 +55,57 @@ export default function SportScreen({ sport, title }: SportScreenProps) {
     retry: 2,
   });
 
+  const dateEvents = useMemo(
+    () =>
+      (events || []).filter((event) => {
+        const eventDate = format(new Date(event.startTimestamp * 1000), "yyyy-MM-dd");
+        return eventDate === dateStr;
+      }),
+    [events, dateStr],
+  );
+
   const liveCount = useMemo(
-    () => events?.filter(isLive).length || 0,
-    [events],
+    () => dateEvents.filter(isLive).length,
+    [dateEvents],
   );
 
   const filteredGroups = useMemo(() => {
     if (!events) return [];
 
-    let filtered = events;
-    if (activeFilter === "live") filtered = events.filter(isLive);
-    else if (activeFilter === "finished") filtered = events.filter(isFinished);
-    else if (activeFilter === "upcoming") filtered = events.filter(isUpcoming);
+    const query = searchQuery.trim().toLowerCase();
+    let filtered = dateEvents;
+
+    if (activeFilter === "live") filtered = filtered.filter(isLive);
+    else if (activeFilter === "finished") filtered = filtered.filter(isFinished);
+    else if (activeFilter === "upcoming") filtered = filtered.filter(isUpcoming);
+
+    if (query) {
+      filtered = filtered.filter((event) => {
+        const tournamentName = event.tournament?.uniqueTournament?.name || event.tournament?.name || "";
+        const categoryName = event.tournament?.uniqueTournament?.category?.name || event.tournament?.category?.name || "";
+        return [
+          event.homeTeam?.name,
+          event.homeTeam?.shortName,
+          event.awayTeam?.name,
+          event.awayTeam?.shortName,
+          tournamentName,
+          categoryName,
+        ]
+          .filter(Boolean)
+          .some((value) => value!.toLowerCase().includes(query));
+      });
+    }
 
     return groupEventsByTournament(filtered);
-  }, [events, activeFilter]);
+  }, [events, activeFilter, searchQuery, dateEvents]);
 
   const handleDateSelect = useCallback((date: Date) => {
     setSelectedDate(date);
     setActiveFilter("all");
+  }, []);
+
+  const clearSearch = useCallback(() => {
+    setSearchQuery("");
   }, []);
 
   const renderItem = useCallback(
@@ -77,7 +113,7 @@ export default function SportScreen({ sport, title }: SportScreenProps) {
     [],
   );
 
-  const webTopPadding = Platform.OS === "web" ? 115 : 0;
+  const webTopPadding = Platform.OS === "web" ? (width < 600 ? 10 : 67) : 0;
 
   return (
     <View style={[styles.container, { paddingTop: webTopPadding }]}>
@@ -101,6 +137,25 @@ export default function SportScreen({ sport, title }: SportScreenProps) {
         onSelectDate={handleDateSelect}
       />
 
+      <View style={styles.searchContainer}>
+        <Ionicons name="search" size={16} color={Colors.dark.textTertiary} />
+        <TextInput
+          value={searchQuery}
+          onChangeText={setSearchQuery}
+          placeholder="Search teams, leagues, countries"
+          placeholderTextColor={Colors.dark.textTertiary}
+          style={styles.searchInput}
+          autoCapitalize="none"
+          autoCorrect={false}
+          clearButtonMode="while-editing"
+        />
+        {searchQuery.length > 0 && Platform.OS !== "ios" ? (
+          <TouchableOpacity onPress={clearSearch} style={styles.clearSearchButton}>
+            <Ionicons name="close-circle" size={16} color={Colors.dark.textTertiary} />
+          </TouchableOpacity>
+        ) : null}
+      </View>
+
       <FilterBar
         activeFilter={activeFilter}
         onFilterChange={setActiveFilter}
@@ -121,7 +176,9 @@ export default function SportScreen({ sport, title }: SportScreenProps) {
           />
           <Text style={styles.emptyText}>No matches found</Text>
           <Text style={styles.emptySubtext}>
-            {activeFilter !== "all"
+            {searchQuery.trim()
+              ? "Try a different team or league name"
+              : activeFilter !== "all"
               ? "Try changing the filter"
               : "No fixtures scheduled for this date"}
           </Text>
@@ -162,7 +219,7 @@ const styles = StyleSheet.create({
   },
   headerBar: {
     paddingHorizontal: 16,
-    paddingBottom: 12,
+    paddingBottom: 10,
     backgroundColor: Colors.dark.surface,
     borderBottomWidth: 1,
     borderBottomColor: Colors.dark.border,
@@ -176,7 +233,7 @@ const styles = StyleSheet.create({
     padding: 4,
   },
   headerTitle: {
-    fontSize: 22,
+    fontSize: 21,
     fontFamily: "Inter_600SemiBold",
     color: Colors.dark.text,
   },
@@ -185,6 +242,31 @@ const styles = StyleSheet.create({
     fontFamily: "Inter_400Regular",
     color: Colors.dark.textSecondary,
     marginTop: 2,
+  },
+  searchContainer: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginHorizontal: 10,
+    marginTop: 8,
+    marginBottom: 2,
+    paddingHorizontal: 12,
+    height: 38,
+    borderRadius: 12,
+    backgroundColor: Colors.dark.surfaceSecondary,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: Colors.dark.border,
+    gap: 8,
+  },
+  searchInput: {
+    flex: 1,
+    color: Colors.dark.text,
+    fontSize: 13,
+    fontFamily: "Inter_400Regular",
+    paddingVertical: 0,
+    outlineStyle: "none",
+  },
+  clearSearchButton: {
+    padding: 2,
   },
   loadingContainer: {
     flex: 1,
