@@ -51,10 +51,24 @@ interface PlayerMetrics {
   decision: number | null;
   intelligence: number | null;
   performance: number | null;
+  defensiveStrength: number | null;
+  attackStrength: number | null;
+  midfieldStrength: number | null;
+  keeperStrength: number | null;
+  fullbackStrength: number | null;
   appearances: number;
   starts: number;
   averageRating: number | null;
+  statSamples: number;
   dataConfidence: "High" | "Medium" | "Low" | "Unavailable";
+}
+
+interface PhaseStrengths {
+  defensiveStrength: number | null;
+  attackStrength: number | null;
+  midfieldStrength: number | null;
+  keeperStrength: number | null;
+  fullbackStrength: number | null;
 }
 
 interface SimulationMetricsResponse {
@@ -62,12 +76,14 @@ interface SimulationMetricsResponse {
     formation?: string | null;
     players?: { playerId: number; metrics: PlayerMetrics }[];
     teamStrength?: number | null;
+    phaseStrengths?: PhaseStrengths;
     matchesAnalyzed?: number;
   };
   away?: {
     formation?: string | null;
     players?: { playerId: number; metrics: PlayerMetrics }[];
     teamStrength?: number | null;
+    phaseStrengths?: PhaseStrengths;
     matchesAnalyzed?: number;
   };
 }
@@ -162,6 +178,30 @@ function getPlayerScore(player?: PlayerData): number {
   return player?.simulationMetrics?.overall || player?.simulationMetrics?.averageRating || 6;
 }
 
+function getPlayerRole(player?: PlayerData): "GK" | "DEF" | "MID" | "ATT" {
+  const position = (player?.position || "").toLowerCase();
+  if (position === "g" || position.includes("goal")) return "GK";
+  if (position.startsWith("d")) return "DEF";
+  if (position.startsWith("m")) return "MID";
+  return "ATT";
+}
+
+function getRoleStrength(player?: PlayerData): number {
+  const metrics = player?.simulationMetrics;
+  const role = getPlayerRole(player);
+  if (role === "GK") return metrics?.keeperStrength || metrics?.defensiveStrength || getPlayerScore(player);
+  if (role === "DEF") return metrics?.defensiveStrength || metrics?.fullbackStrength || getPlayerScore(player);
+  if (role === "MID") return metrics?.midfieldStrength || getPlayerScore(player);
+  return metrics?.attackStrength || getPlayerScore(player);
+}
+
+function metricColor(value: number | null | undefined): string {
+  if (typeof value !== "number") return Colors.dark.textTertiary;
+  if (value >= 7.4) return "#22c55e";
+  if (value >= 6.4) return "#eab308";
+  return "#f97316";
+}
+
 function mergeMetrics(team?: LineupTeam, metrics?: SimulationMetricsResponse["home"]): LineupTeam | undefined {
   if (!team) return team;
   const metricMap = new Map((metrics?.players || []).map((entry) => [entry.playerId, entry.metrics]));
@@ -195,6 +235,9 @@ const PlayerMarker = memo(({ player, side }: { player: PlayerData; side: "home" 
       </Text>
       <Text style={styles.playerMeta} numberOfLines={1}>
         I{metricLabel(metrics?.intelligence)} P{metricLabel(metrics?.performance)}
+      </Text>
+      <Text style={[styles.roleMeta, { color: metricColor(getRoleStrength(player)) }]} numberOfLines={1}>
+        {getPlayerRole(player)} {metricLabel(getRoleStrength(player))}
       </Text>
     </View>
   );
@@ -254,6 +297,8 @@ function SimulationPanel({
   awayPlayers,
   homeStrength,
   awayStrength,
+  homePhases,
+  awayPhases,
 }: {
   homeTeamName: string;
   awayTeamName: string;
@@ -261,6 +306,8 @@ function SimulationPanel({
   awayPlayers: PlayerData[];
   homeStrength?: number | null;
   awayStrength?: number | null;
+  homePhases?: PhaseStrengths;
+  awayPhases?: PhaseStrengths;
 }) {
   const [state, setState] = useState<SimulationState>({
     running: false,
@@ -304,8 +351,8 @@ function SimulationPanel({
         }
 
         const nextMinute = Math.min(90, current.minute + 3);
-        const homePower = homeStrength || 6.4;
-        const awayPower = awayStrength || 6.4;
+        const homePower = ((homePhases?.attackStrength || homeStrength || 6.4) * 0.55) + ((homePhases?.midfieldStrength || homeStrength || 6.4) * 0.25) + ((homePhases?.fullbackStrength || homeStrength || 6.4) * 0.2);
+        const awayPower = ((awayPhases?.attackStrength || awayStrength || 6.4) * 0.55) + ((awayPhases?.midfieldStrength || awayStrength || 6.4) * 0.25) + ((awayPhases?.fullbackStrength || awayStrength || 6.4) * 0.2);
         const totalPower = Math.max(homePower + awayPower, 1);
         const homeChance = homePower / totalPower;
         const attackingTeam: "home" | "away" = Math.random() <= homeChance ? "home" : "away";
@@ -315,9 +362,11 @@ function SimulationPanel({
           attackers[Math.floor(Math.random() * Math.max(attackers.length, 1))] || attackers[0];
         const defender =
           defenders[Math.floor(Math.random() * Math.max(defenders.length, 1))] || defenders[0];
-        const attackerScore = getPlayerScore(attacker);
-        const defenderScore = getPlayerScore(defender);
-        const goalChance = clampForSimulation(0.05 + (attackerScore - defenderScore) * 0.025 + (attackingTeam === "home" ? 0.01 : 0), 0.03, 0.18);
+        const attackerScore = Math.max(getPlayerScore(attacker), getRoleStrength(attacker));
+        const defenderScore = Math.max(getPlayerScore(defender), getRoleStrength(defender));
+        const defendingPhases = attackingTeam === "home" ? awayPhases : homePhases;
+        const defensiveWall = ((defendingPhases?.defensiveStrength || defenderScore) * 0.5) + ((defendingPhases?.keeperStrength || defenderScore) * 0.3) + ((defendingPhases?.midfieldStrength || defenderScore) * 0.2);
+        const goalChance = clampForSimulation(0.05 + (attackerScore - defensiveWall) * 0.025 + (attackingTeam === "home" ? 0.01 : 0), 0.025, 0.17);
         const roll = Math.random();
         const type: LiveEvent["type"] =
           roll < goalChance ? "goal" : roll < goalChance + 0.22 ? "save" : roll < 0.68 ? "attack" : "control";
@@ -344,7 +393,7 @@ function SimulationPanel({
     }, 900);
 
     return () => clearInterval(timer);
-  }, [awayPlayers, awayStrength, homePlayers, homeStrength, state.running]);
+  }, [awayPhases, awayPlayers, awayStrength, homePhases, homePlayers, homeStrength, state.running]);
 
   const canSimulate = homePlayers.length > 0 && awayPlayers.length > 0;
 
@@ -398,6 +447,52 @@ function SimulationPanel({
           ))}
         </View>
       )}
+    </View>
+  );
+}
+
+function PhaseStrengthCard({
+  homeTeamName,
+  awayTeamName,
+  homePhases,
+  awayPhases,
+}: {
+  homeTeamName: string;
+  awayTeamName: string;
+  homePhases?: PhaseStrengths;
+  awayPhases?: PhaseStrengths;
+}) {
+  const rows: { label: string; key: keyof PhaseStrengths; note: string }[] = [
+    { label: "Defensive", key: "defensiveStrength", note: "duels, recoveries, clearances, errors" },
+    { label: "Attack", key: "attackStrength", note: "xG, shots, big chances, xA, dribbles" },
+    { label: "Midfield", key: "midfieldStrength", note: "progression, recoveries, passing, creativity" },
+    { label: "Keeper", key: "keeperStrength", note: "saves, goals prevented, high claims, sweeper actions" },
+    { label: "Full-back", key: "fullbackStrength", note: "crosses, carries, tackles, flank progression" },
+  ];
+
+  return (
+    <View style={styles.phaseCard}>
+      <Text style={styles.cardLabel}>Last 15 role strengths</Text>
+      {rows.map((row) => {
+        const homeValue = homePhases?.[row.key] ?? null;
+        const awayValue = awayPhases?.[row.key] ?? null;
+        return (
+          <View key={row.key} style={styles.phaseRow}>
+            <View style={styles.phaseHeader}>
+              <Text style={styles.phaseLabel}>{row.label}</Text>
+              <Text style={styles.phaseNote} numberOfLines={1}>{row.note}</Text>
+            </View>
+            <View style={styles.phaseScores}>
+              <Text style={[styles.phaseScore, { color: metricColor(homeValue) }]}>
+                {homeTeamName}: {metricLabel(homeValue)}
+              </Text>
+              <Text style={[styles.phaseScore, { color: metricColor(awayValue) }]}>
+                {awayTeamName}: {metricLabel(awayValue)}
+              </Text>
+            </View>
+          </View>
+        );
+      })}
     </View>
   );
 }
@@ -509,6 +604,13 @@ function StadiumSimulationTab({
         </View>
       </View>
 
+      <PhaseStrengthCard
+        homeTeamName={homeTeamName}
+        awayTeamName={awayTeamName}
+        homePhases={simulationMetrics?.home?.phaseStrengths}
+        awayPhases={simulationMetrics?.away?.phaseStrengths}
+      />
+
       <SimulationPanel
         homeTeamName={homeTeamName}
         awayTeamName={awayTeamName}
@@ -516,6 +618,8 @@ function StadiumSimulationTab({
         awayPlayers={awayStarters}
         homeStrength={simulationMetrics?.home?.teamStrength}
         awayStrength={simulationMetrics?.away?.teamStrength}
+        homePhases={simulationMetrics?.home?.phaseStrengths}
+        awayPhases={simulationMetrics?.away?.phaseStrengths}
       />
 
       <View style={{ height: 32 }} />
@@ -713,6 +817,15 @@ const styles = StyleSheet.create({
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 2,
   },
+  roleMeta: {
+    marginTop: 1,
+    fontSize: 7,
+    fontFamily: "Inter_700Bold",
+    textAlign: "center",
+    textShadowColor: "rgba(0, 0, 0, 0.7)",
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
+  },
   centerSpacer: {
     height: 16,
   },
@@ -800,6 +913,43 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontFamily: "Inter_400Regular",
     color: Colors.dark.textSecondary,
+  },
+  phaseCard: {
+    backgroundColor: Colors.dark.card,
+    marginHorizontal: 8,
+    marginTop: 8,
+    borderRadius: 12,
+    padding: 14,
+    gap: 12,
+  },
+  phaseRow: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: Colors.dark.border,
+    paddingTop: 10,
+    gap: 6,
+  },
+  phaseHeader: {
+    gap: 2,
+  },
+  phaseLabel: {
+    fontSize: 13,
+    fontFamily: "Inter_700Bold",
+    color: Colors.dark.text,
+  },
+  phaseNote: {
+    fontSize: 10,
+    fontFamily: "Inter_400Regular",
+    color: Colors.dark.textTertiary,
+  },
+  phaseScores: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    gap: 10,
+  },
+  phaseScore: {
+    flex: 1,
+    fontSize: 11,
+    fontFamily: "Inter_700Bold",
   },
   liveCard: {
     backgroundColor: Colors.dark.card,

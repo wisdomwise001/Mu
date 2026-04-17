@@ -144,6 +144,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
           starts: number;
           ratings: number[];
           recentRatings: number[];
+          statTotals: Record<string, number>;
+          statSamples: number;
           lastPlayedTimestamp: number;
         };
 
@@ -159,6 +161,23 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
         function round1(value: number): number {
           return Math.round(value * 10) / 10;
+        }
+
+        function readStat(stats: any, key: string): number {
+          const value = Number(stats?.[key]);
+          return Number.isFinite(value) ? value : 0;
+        }
+
+        function safeRatio(numerator: number, denominator: number): number | null {
+          return denominator > 0 ? numerator / denominator : null;
+        }
+
+        function scaleVolume(value: number, goodValue: number): number {
+          return clamp(4 + (value / goodValue) * 4, 4, 10);
+        }
+
+        function average(values: number[]): number | null {
+          return values.length > 0 ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
         }
 
         function collectTeamHistory(events: any[], teamId: number): Map<number, PlayerHistory> {
@@ -183,11 +202,23 @@ export async function registerRoutes(app: Express): Promise<Server> {
                 starts: 0,
                 ratings: [],
                 recentRatings: [],
+                statTotals: {},
+                statSamples: 0,
                 lastPlayedTimestamp: 0,
               };
 
               current.appearances += 1;
               if (!entry.substitute) current.starts += 1;
+              if (entry.statistics) {
+                current.statSamples += 1;
+                Object.entries(entry.statistics).forEach(([key, rawValue]) => {
+                  if (key === "ratingVersions" || key === "statisticsType") return;
+                  const value = Number(rawValue);
+                  if (Number.isFinite(value)) {
+                    current.statTotals[key] = (current.statTotals[key] || 0) + value;
+                  }
+                });
+              }
               const rating = Number(entry.statistics?.rating);
               if (Number.isFinite(rating) && rating > 0) {
                 current.ratings.push(rating);
@@ -218,6 +249,93 @@ export async function registerRoutes(app: Express): Promise<Server> {
               : avgRating;
           const appearances = history?.appearances || 0;
           const starts = history?.starts || 0;
+          const statSamples = history?.statSamples || 0;
+          const stat = (key: string) => (statSamples > 0 ? (history?.statTotals[key] || 0) / statSamples : readStat(player.statistics, key));
+          const totalDuelWon = stat("duelWon") + stat("aerialWon");
+          const totalDuelLost = stat("duelLost") + stat("aerialLost") + stat("challengeLost");
+          const duelRate = safeRatio(totalDuelWon, totalDuelWon + totalDuelLost);
+          const passAccuracy = safeRatio(stat("accuratePass"), stat("totalPass"));
+          const longBallAccuracy = safeRatio(stat("accurateLongBalls"), stat("totalLongBalls"));
+          const crossAccuracy = safeRatio(stat("accurateCross"), stat("totalCross"));
+          const tackleRate = safeRatio(stat("wonTackle"), stat("totalTackle"));
+          const defensiveActions =
+            stat("interceptionWon") +
+            stat("ballRecovery") +
+            stat("totalClearance") * 0.55 +
+            stat("wonTackle") * 0.9 +
+            stat("outfielderBlock") * 0.8;
+          const reliability = clamp(
+            (passAccuracy !== null ? passAccuracy * 10 : avgRating || 6) -
+              stat("errorLeadToAShot") * 2.2 -
+              stat("possessionLostCtrl") * 0.08 -
+              stat("dispossessed") * 0.22,
+            3,
+            10,
+          );
+          const defensiveStrength = average([
+            duelRate !== null ? duelRate * 10 : NaN,
+            scaleVolume(defensiveActions, 8),
+            reliability,
+            clamp(6 + stat("defensiveValueNormalized") * 6, 3, 10),
+          ].filter(Number.isFinite));
+          const attackActions =
+            stat("goals") * 2.4 +
+            stat("expectedGoals") * 2 +
+            stat("onTargetScoringAttempt") * 0.75 +
+            stat("totalShots") * 0.25 +
+            stat("bigChanceCreated") * 1.4 +
+            stat("keyPass") * 0.75 +
+            stat("expectedAssists") * 2.4 +
+            stat("wonContest") * 0.35 -
+            stat("bigChanceMissed") * 0.55;
+          const attackStrength = average([
+            scaleVolume(attackActions, 5.2),
+            clamp(6 + stat("shotValueNormalized") * 5, 3, 10),
+            clamp(6 + stat("dribbleValueNormalized") * 5, 3, 10),
+            avgRating || NaN,
+          ].filter(Number.isFinite));
+          const midfieldActions =
+            stat("totalProgression") * 0.08 +
+            stat("passValueNormalized") * 4 +
+            stat("keyPass") * 0.7 +
+            stat("expectedAssists") * 2 +
+            stat("ballRecovery") * 0.45 +
+            stat("interceptionWon") * 0.7 +
+            stat("totalBallCarriesDistance") * 0.018 +
+            stat("progressiveBallCarriesCount") * 0.7;
+          const midfieldStrength = average([
+            scaleVolume(midfieldActions, 6),
+            reliability,
+            passAccuracy !== null ? passAccuracy * 10 : NaN,
+            avgRating || NaN,
+          ].filter(Number.isFinite));
+          const keeperActions =
+            stat("saves") * 1.1 +
+            stat("savedShotsFromInsideTheBox") * 1.2 +
+            stat("goalsPrevented") * 2.2 +
+            stat("keeperSaveValue") * 4 +
+            stat("goodHighClaim") * 0.8 +
+            stat("accurateKeeperSweeper") * 0.8;
+          const keeperStrength = average([
+            scaleVolume(keeperActions, 4),
+            longBallAccuracy !== null ? longBallAccuracy * 10 : NaN,
+            clamp(6 + stat("goalkeeperValueNormalized") * 6, 3, 10),
+            avgRating || NaN,
+          ].filter(Number.isFinite));
+          const fullbackActions =
+            stat("totalCross") * 0.35 +
+            stat("accurateCross") * 1.1 +
+            stat("totalBallCarriesDistance") * 0.02 +
+            stat("progressiveBallCarriesCount") * 0.75 +
+            stat("totalProgression") * 0.07 +
+            stat("wonTackle") * 0.7 +
+            stat("ballRecovery") * 0.35;
+          const fullbackStrength = average([
+            scaleVolume(fullbackActions, 5.5),
+            crossAccuracy !== null ? crossAccuracy * 10 : NaN,
+            tackleRate !== null ? tackleRate * 10 : NaN,
+            reliability,
+          ].filter(Number.isFinite));
           const consistency =
             ratings.length > 1
               ? 10 - clamp(
@@ -249,11 +367,34 @@ export async function registerRoutes(app: Express): Promise<Server> {
             decision: decision ? round1(decision) : null,
             intelligence: intelligence ? round1(intelligence) : null,
             performance: performance ? round1(performance) : null,
+            defensiveStrength: defensiveStrength ? round1(defensiveStrength) : null,
+            attackStrength: attackStrength ? round1(attackStrength) : null,
+            midfieldStrength: midfieldStrength ? round1(midfieldStrength) : null,
+            keeperStrength: keeperStrength ? round1(keeperStrength) : null,
+            fullbackStrength: fullbackStrength ? round1(fullbackStrength) : null,
             appearances,
             starts,
             averageRating: avgRating ? round1(avgRating) : null,
-            dataConfidence: ratings.length >= 8 ? "High" : ratings.length >= 3 ? "Medium" : ratings.length > 0 ? "Low" : "Unavailable",
+            statSamples,
+            dataConfidence: ratings.length >= 8 ? "High" : ratings.length >= 3 ? "Medium" : ratings.length > 0 || statSamples > 0 ? "Low" : "Unavailable",
           };
+        }
+
+        function playerRole(position?: string): "keeper" | "defender" | "midfielder" | "attacker" {
+          const value = (position || "").toLowerCase();
+          if (value === "g" || value.includes("goal")) return "keeper";
+          if (value.startsWith("d")) return "defender";
+          if (value.startsWith("m")) return "midfielder";
+          return "attacker";
+        }
+
+        function roleAwareScore(entry: any): number | null {
+          const role = playerRole(entry.original?.position);
+          const metrics = entry.metrics;
+          if (role === "keeper") return metrics.keeperStrength || metrics.defensiveStrength || metrics.overall;
+          if (role === "defender") return metrics.defensiveStrength || metrics.fullbackStrength || metrics.overall;
+          if (role === "midfielder") return metrics.midfieldStrength || metrics.overall;
+          return metrics.attackStrength || metrics.overall;
         }
 
         function enrichSide(side: "home" | "away", history: Map<number, PlayerHistory>) {
@@ -262,6 +403,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
             const playerId = Number(entry.player?.id);
             return {
               playerId,
+              position: entry.position || null,
               metrics: calculateMetrics(entry, history.get(playerId)),
             };
           });
@@ -269,19 +411,52 @@ export async function registerRoutes(app: Express): Promise<Server> {
           const starters = players.filter((entry: any) => {
             const original = (team?.players || []).find((player: any) => Number(player.player?.id) === entry.playerId);
             return original && !original.substitute;
-          });
+          }).map((entry: any) => ({
+            ...entry,
+            original: (team?.players || []).find((player: any) => Number(player.player?.id) === entry.playerId),
+          }));
           const availableRatings = starters
-            .map((entry: any) => entry.metrics.overall)
+            .map(roleAwareScore)
             .filter((rating: number | null) => typeof rating === "number") as number[];
           const teamStrength =
             availableRatings.length > 0
               ? round1(availableRatings.reduce((sum, rating) => sum + rating, 0) / availableRatings.length)
               : null;
+          const roleScores = {
+            defensiveStrength: starters
+              .filter((entry: any) => ["keeper", "defender"].includes(playerRole(entry.original?.position)))
+              .map((entry: any) => entry.metrics.defensiveStrength || entry.metrics.keeperStrength)
+              .filter((rating: number | null) => typeof rating === "number") as number[],
+            attackStrength: starters
+              .filter((entry: any) => playerRole(entry.original?.position) === "attacker")
+              .map((entry: any) => entry.metrics.attackStrength)
+              .filter((rating: number | null) => typeof rating === "number") as number[],
+            midfieldStrength: starters
+              .filter((entry: any) => playerRole(entry.original?.position) === "midfielder")
+              .map((entry: any) => entry.metrics.midfieldStrength)
+              .filter((rating: number | null) => typeof rating === "number") as number[],
+            keeperStrength: starters
+              .filter((entry: any) => playerRole(entry.original?.position) === "keeper")
+              .map((entry: any) => entry.metrics.keeperStrength)
+              .filter((rating: number | null) => typeof rating === "number") as number[],
+            fullbackStrength: starters
+              .filter((entry: any) => playerRole(entry.original?.position) === "defender")
+              .map((entry: any) => entry.metrics.fullbackStrength)
+              .filter((rating: number | null) => typeof rating === "number") as number[],
+          };
+          const averageRole = (values: number[]) => (values.length > 0 ? round1(values.reduce((sum, value) => sum + value, 0) / values.length) : null);
 
           return {
             formation: team?.formation || null,
             players,
             teamStrength,
+            phaseStrengths: {
+              defensiveStrength: averageRole(roleScores.defensiveStrength),
+              attackStrength: averageRole(roleScores.attackStrength),
+              midfieldStrength: averageRole(roleScores.midfieldStrength),
+              keeperStrength: averageRole(roleScores.keeperStrength),
+              fullbackStrength: averageRole(roleScores.fullbackStrength),
+            },
             matchesAnalyzed: side === "home" ? homeLast15.length : awayLast15.length,
           };
         }
@@ -293,7 +468,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           home: enrichSide("home", homeHistory),
           away: enrichSide("away", awayHistory),
           confirmed: currentLineups?.confirmed ?? null,
-          source: "last_15_lineup_ratings",
+          source: "last_15_role_based_lineup_statistics",
         });
       } catch (error: any) {
         console.error("Error building player simulation:", error.message);
