@@ -23,7 +23,15 @@ interface PlayerData {
 interface LineupTeam {
   formation?: string;
   players: PlayerData[];
-  missingPlayers?: { player: { shortName?: string; id?: number }; type?: string; reason?: string }[];
+  missingPlayers?: MissingPlayer[];
+}
+
+interface MissingPlayer {
+  player: { shortName?: string; id?: number; name?: string; position?: string };
+  type?: string;
+  reason?: string | number;
+  description?: string;
+  expectedEndDate?: string;
 }
 
 interface LineupsResponse {
@@ -65,6 +73,7 @@ function LineupsTab({ eventId, homeTeamName, awayTeamName }: LineupsTabProps) {
   const teamName = activeTeam === "home" ? homeTeamName : awayTeamName;
   const starters = team?.players?.filter((p) => !p.substitute) || [];
   const subs = team?.players?.filter((p) => p.substitute) || [];
+  const missingPlayers = team?.missingPlayers || [];
 
   return (
     <ScrollView style={styles.container} showsVerticalScrollIndicator={false}>
@@ -103,6 +112,8 @@ function LineupsTab({ eventId, homeTeamName, awayTeamName }: LineupsTabProps) {
           <Text style={styles.unconfirmedText}>Predicted lineups</Text>
         </View>
       )}
+
+      <MissingPlayersReport teamName={teamName} players={missingPlayers} />
 
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>Starting XI</Text>
@@ -151,6 +162,77 @@ const PlayerRow = memo(({ player }: { player: PlayerData }) => {
           <Text style={styles.ratingText}>{rating.toFixed(1)}</Text>
         </View>
       ) : null}
+    </View>
+  );
+});
+
+function getMissingPlayerStatus(player: MissingPlayer) {
+  const text = `${player.description || ""} ${player.reason || ""} ${player.type || ""}`.toLowerCase();
+  if (text.includes("suspension") || text.includes("suspend") || text.includes("red_card")) {
+    return "Suspended";
+  }
+  if (text.includes("doubt")) {
+    return "Doubtful";
+  }
+  if (text.includes("unavailable")) {
+    return "Unavailable";
+  }
+  return "Injured";
+}
+
+function formatExpectedEndDate(value?: string) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+const MissingPlayersReport = memo(({ teamName, players }: { teamName: string; players: MissingPlayer[] }) => {
+  return (
+    <View style={styles.section}>
+      <View style={styles.reportHeader}>
+        <View>
+          <Text style={styles.sectionTitle}>Injury & Suspension Report</Text>
+          <Text style={styles.reportSubtitle}>{teamName}</Text>
+        </View>
+        <View style={styles.reportCountBadge}>
+          <Text style={styles.reportCountText}>{players.length}</Text>
+        </View>
+      </View>
+
+      {players.length === 0 ? (
+        <Text style={styles.noReportText}>No reported injuries or suspensions.</Text>
+      ) : (
+        players.map((missingPlayer) => {
+          const status = getMissingPlayerStatus(missingPlayer);
+          const expectedEndDate = formatExpectedEndDate(missingPlayer.expectedEndDate);
+          const isSuspended = status === "Suspended";
+          const description = missingPlayer.description?.replace(/_/g, " ") || status;
+
+          return (
+            <View key={missingPlayer.player?.id || `${missingPlayer.player?.shortName}-${description}`} style={styles.missingPlayerRow}>
+              <Image
+                source={{ uri: getPlayerImageUrl(missingPlayer.player?.id || 0) }}
+                style={styles.missingPlayerImage}
+                contentFit="cover"
+                cachePolicy="disk"
+              />
+              <View style={styles.missingPlayerInfo}>
+                <Text style={styles.missingPlayerName} numberOfLines={1}>
+                  {missingPlayer.player?.shortName || missingPlayer.player?.name || "Player"}
+                </Text>
+                <Text style={styles.missingPlayerReason} numberOfLines={2}>
+                  {description}
+                  {expectedEndDate ? ` · Expected back ${expectedEndDate}` : ""}
+                </Text>
+              </View>
+              <View style={[styles.statusBadge, isSuspended && styles.suspensionBadge]}>
+                <Text style={styles.statusBadgeText}>{status}</Text>
+              </View>
+            </View>
+          );
+        })
+      )}
     </View>
   );
 });
@@ -249,6 +331,82 @@ const styles = StyleSheet.create({
     fontFamily: "Inter_600SemiBold",
     color: Colors.dark.text,
     marginBottom: 8,
+  },
+  reportHeader: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: 12,
+  },
+  reportSubtitle: {
+    fontSize: 12,
+    fontFamily: "Inter_400Regular",
+    color: Colors.dark.textSecondary,
+    marginTop: -4,
+    marginBottom: 8,
+  },
+  reportCountBadge: {
+    minWidth: 28,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: Colors.dark.surfaceSecondary,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 8,
+  },
+  reportCountText: {
+    fontSize: 12,
+    fontFamily: "Inter_700Bold",
+    color: Colors.dark.text,
+  },
+  noReportText: {
+    fontSize: 13,
+    fontFamily: "Inter_400Regular",
+    color: Colors.dark.textSecondary,
+  },
+  missingPlayerRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingVertical: 9,
+    gap: 10,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: Colors.dark.border,
+  },
+  missingPlayerImage: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    backgroundColor: Colors.dark.border,
+  },
+  missingPlayerInfo: {
+    flex: 1,
+    minWidth: 0,
+  },
+  missingPlayerName: {
+    fontSize: 13,
+    fontFamily: "Inter_600SemiBold",
+    color: Colors.dark.text,
+  },
+  missingPlayerReason: {
+    fontSize: 11,
+    fontFamily: "Inter_400Regular",
+    color: Colors.dark.textSecondary,
+    marginTop: 2,
+    textTransform: "capitalize",
+  },
+  statusBadge: {
+    borderRadius: 999,
+    backgroundColor: "rgba(229, 56, 59, 0.14)",
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  suspensionBadge: {
+    backgroundColor: "rgba(255, 166, 0, 0.16)",
+  },
+  statusBadgeText: {
+    fontSize: 10,
+    fontFamily: "Inter_700Bold",
+    color: Colors.dark.text,
   },
   playerRow: {
     flexDirection: "row",
