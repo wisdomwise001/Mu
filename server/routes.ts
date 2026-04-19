@@ -2386,21 +2386,31 @@ Output ONLY a valid JSON object. No markdown, no code blocks, no explanation out
             const aForm = a?.formSummary;
 
             // ── Incomplete data check ────────────────────────────────────────
-            // Skip matches where either team is missing the core detailed stats
-            // (xG, possession, total shots). matchesWithStats only counts matches
-            // where ANY stat was found (e.g. fouls), so we test the actual averages
-            // that will be stored — if they're null, the row is training-useless.
-            const hHasDetailedStats = hStats?.avgXg != null && hStats?.avgPossession != null && hStats?.avgTotalShots != null;
-            const aHasDetailedStats = aStats?.avgXg != null && aStats?.avgPossession != null && aStats?.avgTotalShots != null;
-            if (!hHasDetailedStats || !aHasDetailedStats) {
+            // Require the full-match AND per-half key stats to be present for
+            // both teams. We test actual averages that will be stored — if any
+            // critical field is null the row is display-useless (shows "—").
+            // Full-match: xG + possession + total shots (all required)
+            // Per-half:   possession + total shots (xG is absent for many leagues;
+            //             pass accuracy can be absent too — only poss+shots checked)
+            const missingStats: string[] = [];
+            if (hStats?.avgXg == null)            missingStats.push(`${homeTeamName} full-match xG`);
+            if (hStats?.avgPossession == null)     missingStats.push(`${homeTeamName} full-match possession`);
+            if (hStats?.avgTotalShots == null)     missingStats.push(`${homeTeamName} full-match shots`);
+            if (aStats?.avgXg == null)            missingStats.push(`${awayTeamName} full-match xG`);
+            if (aStats?.avgPossession == null)     missingStats.push(`${awayTeamName} full-match possession`);
+            if (aStats?.avgTotalShots == null)     missingStats.push(`${awayTeamName} full-match shots`);
+            if (hStats1h?.avgPossession == null)   missingStats.push(`${homeTeamName} 1H possession`);
+            if (hStats1h?.avgTotalShots == null)   missingStats.push(`${homeTeamName} 1H shots`);
+            if (hStats2h?.avgPossession == null)   missingStats.push(`${homeTeamName} 2H possession`);
+            if (hStats2h?.avgTotalShots == null)   missingStats.push(`${homeTeamName} 2H shots`);
+            if (aStats1h?.avgPossession == null)   missingStats.push(`${awayTeamName} 1H possession`);
+            if (aStats1h?.avgTotalShots == null)   missingStats.push(`${awayTeamName} 1H shots`);
+            if (aStats2h?.avgPossession == null)   missingStats.push(`${awayTeamName} 2H possession`);
+            if (aStats2h?.avgTotalShots == null)   missingStats.push(`${awayTeamName} 2H shots`);
+            if (missingStats.length > 0) {
               job.skipped++;
               job.processed++;
-              const reason = !hHasDetailedStats && !aHasDetailedStats
-                ? "both teams missing xG/possession/shots"
-                : !hHasDetailedStats
-                  ? `${homeTeamName} missing xG/possession/shots`
-                  : `${awayTeamName} missing xG/possession/shots`;
-              job.log.push(`⏭ Skipped (incomplete stats — ${reason}): ${homeTeamName} vs ${awayTeamName}`);
+              job.log.push(`⏭ Skipped (incomplete stats — missing: ${missingStats.slice(0, 3).join(", ")}${missingStats.length > 3 ? ` +${missingStats.length - 3} more` : ""}): ${homeTeamName} vs ${awayTeamName}`);
               continue;
             }
 

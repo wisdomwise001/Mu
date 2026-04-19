@@ -253,4 +253,31 @@ col("away_suspended_players", "TEXT");
 col("home_injury_impact", "REAL");
 col("away_injury_impact", "REAL");
 
+// ── Startup: prune stored matches that are missing the key half-period stats ─
+// Matches missing 1H/2H possession or shots will always show "—" in the UI
+// and are useless for half-time training. Remove them once at startup so the
+// user doesn't need to clear and re-upload the entire database.
+{
+  const pruneResult = db.prepare(`
+    DELETE FROM match_simulations
+    WHERE home_h1_avg_possession IS NULL
+       OR home_h1_avg_total_shots IS NULL
+       OR home_h2_avg_possession IS NULL
+       OR home_h2_avg_total_shots IS NULL
+       OR away_h1_avg_possession IS NULL
+       OR away_h1_avg_total_shots IS NULL
+       OR away_h2_avg_possession IS NULL
+       OR away_h2_avg_total_shots IS NULL
+       OR home_avg_xg IS NULL
+       OR home_avg_possession IS NULL
+       OR home_avg_total_shots IS NULL
+       OR away_avg_xg IS NULL
+       OR away_avg_possession IS NULL
+       OR away_avg_total_shots IS NULL
+  `).run();
+  if (pruneResult.changes > 0) {
+    console.log(`[DB] Pruned ${pruneResult.changes} incomplete match(es) missing key half-period or full-match stats.`);
+  }
+}
+
 export default db;
