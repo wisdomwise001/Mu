@@ -13,10 +13,8 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { getApiUrl } from "@/lib/query-client";
+import { apiRequest } from "@/lib/query-client";
 import Colors from "@/constants/colors";
-
-function apiUrl(path: string) { return `${getApiUrl()}${path}`; }
 
 interface EngineStatus {
   trained: boolean;
@@ -100,11 +98,7 @@ export default function EngineScreen() {
 
   const trainMutation = useMutation({
     mutationFn: async () => {
-      const res = await fetch(apiUrl("/api/engine/train"), { method: "POST" });
-      if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.error || "Training failed to start");
-      }
+      const res = await apiRequest("POST", "/api/engine/train");
       return res.json();
     },
     onSuccess: () => {
@@ -122,11 +116,7 @@ export default function EngineScreen() {
 
   const deleteMutation = useMutation({
     mutationFn: async () => {
-      const res = await fetch(apiUrl("/api/engine/models"), { method: "DELETE" });
-      if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.error || "Delete failed");
-      }
+      const res = await apiRequest("DELETE", "/api/engine/models");
       return res.json();
     },
     onSuccess: () => {
