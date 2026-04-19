@@ -1930,6 +1930,7 @@ Output ONLY a valid JSON object. No markdown, no code blocks, no explanation out
   app.delete("/api/engine/models", (_req: Request, res: Response) => {
     try {
       db.prepare("DELETE FROM engine_models").run();
+      engine.reset();
       res.json({ success: true, message: "All saved engine models cleared. Ready to retrain." });
     } catch (error: any) {
       res.status(500).json({ error: error.message });

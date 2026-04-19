@@ -743,6 +743,19 @@ class XGEngine {
   private causalLive: { model: MultivariateLinearRegression; featureMeans: number[] } | null = null;
   private metaModel: MultivariateLinearRegression | null = null;
 
+  /** Clear all in-memory model state (call after deleting from DB) */
+  reset() {
+    if (this.annModel) {
+      try { this.annModel.dispose(); } catch {}
+    }
+    this.annModel    = null;
+    this.rfModels    = null;
+    this.gbmLive     = null;
+    this.causalLive  = null;
+    this.metaModel   = null;
+    this.persisted   = null;
+  }
+
   async load(): Promise<boolean> {
     try {
       const row: any = db.prepare("SELECT weights FROM engine_models WHERE model_name = 'full_engine'").get();

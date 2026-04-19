@@ -74,6 +74,7 @@ export default function EngineScreen() {
   const insets = useSafeAreaInsets();
   const queryClient = useQueryClient();
   const [polling, setPolling] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const webTop = Platform.OS === "web" ? 67 : 0;
   const webBottom = Platform.OS === "web" ? 84 : 0;
 
@@ -120,33 +121,19 @@ export default function EngineScreen() {
       return res.json();
     },
     onSuccess: () => {
+      setConfirmDelete(false);
       queryClient.invalidateQueries({ queryKey: ["/api/engine/status"] });
       refetchStatus();
-      Alert.alert(
-        "Models Cleared",
-        "All saved engine models have been deleted. The engine is ready for fresh training.",
-        [{ text: "OK", style: "default" }]
-      );
     },
     onError: (err: Error) => {
+      setConfirmDelete(false);
       Alert.alert("Error", err.message, [{ text: "OK" }]);
     },
   });
 
   const handleDeleteModels = useCallback(() => {
-    Alert.alert(
-      "Delete All Saved Models",
-      "This will permanently remove all trained model weights. The engine will need to be fully retrained before it can make predictions.\n\nAre you sure?",
-      [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Delete All Models",
-          style: "destructive",
-          onPress: () => deleteMutation.mutate(),
-        },
-      ]
-    );
-  }, [deleteMutation]);
+    setConfirmDelete(true);
+  }, []);
 
   const isTraining = polling && progress?.running;
   const trainingProgress = progress?.progress ?? 0;
@@ -245,21 +232,41 @@ export default function EngineScreen() {
         Trains on all {status?.trainingSamples ?? "stored"} historical matches using 92 features — full match, first-half, second-half stats, role strengths and form. All 9 models trained end-to-end.
       </Text>
 
-      {status?.trained && (
+      {status?.trained && !confirmDelete && (
         <TouchableOpacity
-          style={[styles.deleteButton, deleteMutation.isPending && styles.trainButtonDisabled]}
+          style={[styles.deleteButton, (deleteMutation.isPending || !!isTraining) && styles.trainButtonDisabled]}
           onPress={handleDeleteModels}
-          disabled={deleteMutation.isPending || isTraining}
+          disabled={deleteMutation.isPending || !!isTraining}
         >
-          {deleteMutation.isPending ? (
-            <ActivityIndicator size="small" color="#f87171" />
-          ) : (
-            <Ionicons name="trash-outline" size={16} color="#f87171" />
-          )}
-          <Text style={styles.deleteButtonText}>
-            {deleteMutation.isPending ? "Clearing..." : "Delete All Saved Models"}
-          </Text>
+          <Ionicons name="trash-outline" size={16} color="#f87171" />
+          <Text style={styles.deleteButtonText}>Delete All Saved Models</Text>
         </TouchableOpacity>
+      )}
+
+      {status?.trained && confirmDelete && (
+        <View style={styles.confirmDeleteRow}>
+          <Text style={styles.confirmDeleteText}>Remove all saved model weights?</Text>
+          <View style={styles.confirmDeleteButtons}>
+            <TouchableOpacity
+              style={styles.confirmCancelBtn}
+              onPress={() => setConfirmDelete(false)}
+              disabled={deleteMutation.isPending}
+            >
+              <Text style={styles.confirmCancelText}>Cancel</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.confirmDeleteBtn, deleteMutation.isPending && styles.trainButtonDisabled]}
+              onPress={() => deleteMutation.mutate()}
+              disabled={deleteMutation.isPending}
+            >
+              {deleteMutation.isPending ? (
+                <ActivityIndicator size="small" color="#fff" />
+              ) : (
+                <Text style={styles.confirmDeleteBtnText}>Yes, Delete</Text>
+              )}
+            </TouchableOpacity>
+          </View>
+        </View>
       )}
 
       <View style={styles.architectureSection}>
@@ -356,6 +363,22 @@ const styles = StyleSheet.create({
     backgroundColor: "#7f1d1d22",
   },
   deleteButtonText: { fontSize: 13, fontFamily: "Inter_500Medium", color: "#f87171" },
+  confirmDeleteRow: {
+    borderRadius: 12, padding: 14, marginBottom: 8,
+    backgroundColor: "#7f1d1d22", borderWidth: 1, borderColor: "#f8717133",
+  },
+  confirmDeleteText: { fontSize: 13, fontFamily: "Inter_500Medium", color: "#f87171", marginBottom: 10, textAlign: "center" },
+  confirmDeleteButtons: { flexDirection: "row", gap: 8 },
+  confirmCancelBtn: {
+    flex: 1, borderRadius: 10, paddingVertical: 10, alignItems: "center",
+    backgroundColor: Colors.dark.card, borderWidth: 1, borderColor: Colors.dark.border,
+  },
+  confirmCancelText: { fontSize: 13, fontFamily: "Inter_600SemiBold", color: Colors.dark.textSecondary },
+  confirmDeleteBtn: {
+    flex: 1, borderRadius: 10, paddingVertical: 10, alignItems: "center",
+    backgroundColor: "#dc2626",
+  },
+  confirmDeleteBtnText: { fontSize: 13, fontFamily: "Inter_600SemiBold", color: "#fff" },
   architectureSection: { marginBottom: 24 },
   sectionTitle: { fontSize: 16, fontFamily: "Inter_700Bold", color: Colors.dark.text, marginBottom: 4 },
   sectionSubtitle: { fontSize: 12, fontFamily: "Inter_400Regular", color: Colors.dark.textSecondary, marginBottom: 12 },
