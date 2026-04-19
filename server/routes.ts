@@ -721,12 +721,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
             addS("cornerKicks", get(["corner kicks"]));
             addS("goalkeeperSaves", get(["goalkeeper saves"]));
             addS("goalsPrevented", get(["goals prevented"]));
-            addS("passAccuracy", get(["pass accuracy", "passes %", "accurate passes %", "accurate passes %"]));
+            // Pass accuracy: try direct stat first, then compute from accurate/total ratio
+            const directPassAcc = get(["pass accuracy", "passes %", "accurate passes %"]);
+            const accuratePassesCount = get(["accurate passes"]);
+            const totalPassesCount = get(["total passes", "passes"]);
+            if (directPassAcc !== null) {
+              addS("passAccuracy", directPassAcc);
+            } else if (accuratePassesCount !== null && totalPassesCount !== null && totalPassesCount > 0) {
+              addS("passAccuracy", Math.round((accuratePassesCount / totalPassesCount) * 1000) / 10);
+            }
+            addS("totalPasses", totalPassesCount);
             addS("tacklesWon", get(["tackles won", "tackles %", "tackles won %"]));
             addS("interceptions", get(["interceptions"]));
             addS("clearances", get(["clearances"]));
             addS("fouls", get(["fouls"]));
-            addS("totalPasses", get(["total passes", "passes", "accurate passes"]));
             addS("touchesOpBox", get(["touches in opposition box", "touches in opp. box"]));
             addS("duelsWon", get(["total duels won", "duels won", "duels %", "duels"]));
           });
