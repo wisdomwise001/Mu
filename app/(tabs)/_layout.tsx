@@ -18,6 +18,14 @@ function NativeTabLayout() {
         <Icon sf={{ default: "basketball", selected: "basketball.fill" }} />
         <Label>Basketball</Label>
       </NativeTabs.Trigger>
+      <NativeTabs.Trigger name="processing">
+        <Icon sf={{ default: "square.and.arrow.up", selected: "square.and.arrow.up.fill" }} />
+        <Label>Processing</Label>
+      </NativeTabs.Trigger>
+      <NativeTabs.Trigger name="database">
+        <Icon sf={{ default: "cylinder", selected: "cylinder.fill" }} />
+        <Label>Database</Label>
+      </NativeTabs.Trigger>
     </NativeTabs>
   );
 }
@@ -74,6 +82,24 @@ function ClassicTabLayout() {
           title: "Basketball",
           tabBarIcon: ({ color, size }) => (
             <Ionicons name="basketball-outline" size={size} color={color} />
+          ),
+        }}
+      />
+      <Tabs.Screen
+        name="processing"
+        options={{
+          title: "Processing",
+          tabBarIcon: ({ color, size }) => (
+            <Ionicons name="cloud-upload-outline" size={size} color={color} />
+          ),
+        }}
+      />
+      <Tabs.Screen
+        name="database"
+        options={{
+          title: "Database",
+          tabBarIcon: ({ color, size }) => (
+            <Ionicons name="server-outline" size={size} color={color} />
           ),
         }}
       />

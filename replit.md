@@ -15,3 +15,8 @@
 - The Matches tab also now applies the same newest-first sorting/filtering because SofaScore's `/team/:id/events/last/0` response can arrive oldest-to-newest inside the page, as seen for Sassuolo.
 - AI Insight errors are now sanitized so provider credential/authorization details are not displayed directly in the mobile UI.
 - Metro ignores `.local` and `.cache` runtime folders to avoid watcher crashes from transient Replit state files.
+- Last-15 match history now fetches pages 0, 1, and 2 in parallel (~30 events) to ensure enough finished matches are always available for the filter to find 15.
+- Added **Processing** and **Database** tabs backed by a SQLite database (`data/matches.db`) via `better-sqlite3`.
+  - **Processing tab**: pick any past date + sport → "Bulk Upload" starts a background job; matches are processed one at a time with 2.5 s delays (anti-blocking); live progress bar + log; cancel support.
+  - **Database tab**: browse all stored match records with search, expandable simulation stats per match (form, scoring, defending, xG, possession, shots, pass accuracy, etc.) and actual outcomes; delete individual records.
+  - Schema: `server/db.ts`; API routes added to `server/routes.ts` (`/api/database/*`).

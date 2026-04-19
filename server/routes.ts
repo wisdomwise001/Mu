@@ -1,6 +1,7 @@
 import type { Express, Request, Response } from "express";
 import { createServer, type Server } from "node:http";
 import OpenAI from "openai";
+import db from "./db";
 
 const openai = new OpenAI({
   apiKey: process.env.AI_INTEGRATIONS_OPENAI_API_KEY,
@@ -8,6 +9,24 @@ const openai = new OpenAI({
 });
 
 const SOFASCORE_API = "https://api.sofascore.com/api/v1";
+
+type ProcessingJob = {
+  id: string;
+  status: "running" | "completed" | "cancelled";
+  total: number;
+  processed: number;
+  stored: number;
+  skipped: number;
+  failed: number;
+  log: string[];
+  cancelRequested: boolean;
+};
+
+const jobs = new Map<string, ProcessingJob>();
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 const SOFASCORE_HEADERS: Record<string, string> = {
   "User-Agent":
@@ -1836,6 +1855,227 @@ Output ONLY a valid JSON object. No markdown, no code blocks, no explanation out
           : "AI insight could not be generated right now. Please try again.",
       });
     }
+  });
+
+  // ─── Database: list stored matches ────────────────────────────────────────
+  app.get("/api/database/matches", (req: Request, res: Response) => {
+    try {
+      const { search, date, sport, limit = "100", offset = "0" } = req.query as Record<string, string>;
+      let query = "SELECT * FROM match_simulations WHERE 1=1";
+      const params: any[] = [];
+      if (search) {
+        query += " AND (home_team_name LIKE ? OR away_team_name LIKE ? OR tournament LIKE ?)";
+        params.push(`%${search}%`, `%${search}%`, `%${search}%`);
+      }
+      if (date) {
+        query += " AND match_date = ?";
+        params.push(date);
+      }
+      if (sport) {
+        query += " AND sport = ?";
+        params.push(sport);
+      }
+      query += " ORDER BY start_timestamp DESC LIMIT ? OFFSET ?";
+      params.push(Number(limit), Number(offset));
+      const rows = db.prepare(query).all(...params);
+      const countQuery = query.replace(/SELECT \*/, "SELECT COUNT(*) as total").replace(/ORDER BY.*/, "");
+      const total = (db.prepare(countQuery).get(...params.slice(0, -2)) as any)?.total ?? 0;
+      res.json({ matches: rows, total });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // ─── Database: delete a match ─────────────────────────────────────────────
+  app.delete("/api/database/match/:eventId", (req: Request, res: Response) => {
+    try {
+      const info = db.prepare("DELETE FROM match_simulations WHERE event_id = ?").run(Number(req.params.eventId));
+      if (info.changes === 0) return res.status(404).json({ error: "Not found" });
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // ─── Database: stats summary ─────────────────────────────────────────────
+  app.get("/api/database/stats", (_req: Request, res: Response) => {
+    try {
+      const total = (db.prepare("SELECT COUNT(*) as c FROM match_simulations").get() as any)?.c ?? 0;
+      const byResult = db.prepare("SELECT result, COUNT(*) as c FROM match_simulations GROUP BY result").all();
+      res.json({ total, byResult });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // ─── Processing: start job ────────────────────────────────────────────────
+  app.post("/api/database/process-date", async (req: Request, res: Response) => {
+    try {
+      const { date, sport = "football" } = req.body as { date: string; sport?: string };
+      if (!date) return res.status(400).json({ error: "date is required (YYYY-MM-DD)" });
+
+      const sofaDate = date;
+      const eventsData = await fetchSofaScore(`/sport/${sport}/scheduled-events/${sofaDate}`);
+      const allEvents: any[] = eventsData?.events || [];
+
+      const finishedEvents = allEvents.filter((e: any) => {
+        const type = e.status?.type;
+        return type === "finished";
+      });
+
+      if (finishedEvents.length === 0) {
+        return res.json({ jobId: null, message: "No finished matches found for this date", total: 0 });
+      }
+
+      const jobId = `job_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+      const job: ProcessingJob = {
+        id: jobId,
+        status: "running",
+        total: finishedEvents.length,
+        processed: 0,
+        stored: 0,
+        skipped: 0,
+        failed: 0,
+        log: [],
+        cancelRequested: false,
+      };
+      jobs.set(jobId, job);
+
+      const serverPort = process.env.PORT || 5000;
+      const baseUrl = `http://localhost:${serverPort}`;
+
+      (async () => {
+        for (const event of finishedEvents) {
+          if (job.cancelRequested) {
+            job.status = "cancelled";
+            break;
+          }
+
+          const eventId = event.id;
+          const homeTeamId = event.homeTeam?.id;
+          const awayTeamId = event.awayTeam?.id;
+          const homeTeamName = event.homeTeam?.name || event.homeTeam?.shortName || "Unknown";
+          const awayTeamName = event.awayTeam?.name || event.awayTeam?.shortName || "Unknown";
+          const tournament = event.tournament?.name || event.tournament?.uniqueTournament?.name || "";
+          const startTimestamp = event.startTimestamp;
+          const matchDate = date;
+
+          // Skip if already stored
+          const existing = db.prepare("SELECT id FROM match_simulations WHERE event_id = ?").get(eventId);
+          if (existing) {
+            job.skipped++;
+            job.processed++;
+            job.log.push(`⏭ Skipped (already stored): ${homeTeamName} vs ${awayTeamName}`);
+            continue;
+          }
+
+          const homeScore = event.homeScore?.current ?? event.homeScore?.display ?? null;
+          const awayScore = event.awayScore?.current ?? event.awayScore?.display ?? null;
+          if (homeScore === null || awayScore === null) {
+            job.skipped++;
+            job.processed++;
+            job.log.push(`⏭ Skipped (no score): ${homeTeamName} vs ${awayTeamName}`);
+            continue;
+          }
+
+          const hGoals = Number(homeScore);
+          const aGoals = Number(awayScore);
+          const result = hGoals > aGoals ? "H" : hGoals === aGoals ? "D" : "A";
+
+          try {
+            // Anti-blocking: 2.5s delay between each match
+            await sleep(2500);
+
+            const simRes = await fetch(
+              `${baseUrl}/api/event/${eventId}/player-simulation?homeTeamId=${homeTeamId}&awayTeamId=${awayTeamId}`,
+              { signal: AbortSignal.timeout(60000) }
+            );
+
+            if (!simRes.ok) {
+              throw new Error(`Simulation HTTP ${simRes.status}`);
+            }
+
+            const sim: any = await simRes.json();
+            const h = sim.home;
+            const a = sim.away;
+            const hStats = h?.teamMatchStats?.all;
+            const aStats = a?.teamMatchStats?.all;
+            const hPhase = h?.phaseStrengths;
+            const aPhase = a?.phaseStrengths;
+
+            db.prepare(`
+              INSERT OR REPLACE INTO match_simulations (
+                event_id, home_team_id, home_team_name, away_team_id, away_team_name,
+                tournament, sport, match_date, start_timestamp,
+                home_goals, away_goals, result,
+                home_form_strength, home_scoring_strength, home_defending_strength,
+                home_phase_defensive, home_phase_attack, home_phase_midfield, home_phase_keeper,
+                home_avg_goals_scored, home_avg_goals_conceded, home_avg_xg, home_avg_possession,
+                home_avg_big_chances, home_avg_total_shots, home_avg_shots_on_target,
+                home_avg_pass_accuracy, home_avg_tackles_won, home_avg_interceptions, home_avg_corner_kicks,
+                home_matches_analyzed,
+                away_form_strength, away_scoring_strength, away_defending_strength,
+                away_phase_defensive, away_phase_attack, away_phase_midfield, away_phase_keeper,
+                away_avg_goals_scored, away_avg_goals_conceded, away_avg_xg, away_avg_possession,
+                away_avg_big_chances, away_avg_total_shots, away_avg_shots_on_target,
+                away_avg_pass_accuracy, away_avg_tackles_won, away_avg_interceptions, away_avg_corner_kicks,
+                away_matches_analyzed,
+                processed_at
+              ) VALUES (
+                ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
+              )
+            `).run(
+              eventId, homeTeamId, homeTeamName, awayTeamId, awayTeamName,
+              tournament, sport, matchDate, startTimestamp,
+              hGoals, aGoals, result,
+              h?.formStrength ?? null, h?.scoringStrength ?? null, h?.defendingStrength ?? null,
+              hPhase?.defensiveStrength ?? null, hPhase?.attackStrength ?? null, hPhase?.midfieldStrength ?? null, hPhase?.keeperStrength ?? null,
+              hStats?.avgGoalsScored ?? null, hStats?.avgGoalsConceded ?? null, hStats?.avgXg ?? null, hStats?.avgPossession ?? null,
+              hStats?.avgBigChances ?? null, hStats?.avgTotalShots ?? null, hStats?.avgShotsOnTarget ?? null,
+              hStats?.avgPassAccuracy ?? null, hStats?.avgTacklesWon ?? null, hStats?.avgInterceptions ?? null, hStats?.avgCornerKicks ?? null,
+              h?.matchesAnalyzed ?? null,
+              a?.formStrength ?? null, a?.scoringStrength ?? null, a?.defendingStrength ?? null,
+              aPhase?.defensiveStrength ?? null, aPhase?.attackStrength ?? null, aPhase?.midfieldStrength ?? null, aPhase?.keeperStrength ?? null,
+              aStats?.avgGoalsScored ?? null, aStats?.avgGoalsConceded ?? null, aStats?.avgXg ?? null, aStats?.avgPossession ?? null,
+              aStats?.avgBigChances ?? null, aStats?.avgTotalShots ?? null, aStats?.avgShotsOnTarget ?? null,
+              aStats?.avgPassAccuracy ?? null, aStats?.avgTacklesWon ?? null, aStats?.avgInterceptions ?? null, aStats?.avgCornerKicks ?? null,
+              a?.matchesAnalyzed ?? null,
+              new Date().toISOString(),
+            );
+
+            job.stored++;
+            job.log.push(`✅ Stored: ${homeTeamName} ${hGoals}-${aGoals} ${awayTeamName} (${tournament})`);
+          } catch (err: any) {
+            job.failed++;
+            job.log.push(`❌ Failed: ${homeTeamName} vs ${awayTeamName} — ${err.message}`);
+          }
+
+          job.processed++;
+        }
+
+        if (job.status !== "cancelled") job.status = "completed";
+      })();
+
+      res.json({ jobId, total: finishedEvents.length });
+    } catch (error: any) {
+      console.error("Process-date error:", error.message);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // ─── Processing: poll job status ──────────────────────────────────────────
+  app.get("/api/database/job/:jobId", (req: Request, res: Response) => {
+    const job = jobs.get(req.params.jobId);
+    if (!job) return res.status(404).json({ error: "Job not found" });
+    res.json(job);
+  });
+
+  // ─── Processing: cancel job ───────────────────────────────────────────────
+  app.post("/api/database/job/:jobId/cancel", (req: Request, res: Response) => {
+    const job = jobs.get(req.params.jobId);
+    if (!job) return res.status(404).json({ error: "Job not found" });
+    job.cancelRequested = true;
+    res.json({ success: true });
   });
 
   const httpServer = createServer(app);
