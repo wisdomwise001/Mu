@@ -2,6 +2,7 @@ import type { Express, Request, Response } from "express";
 import { createServer, type Server } from "node:http";
 import OpenAI from "openai";
 import db from "./db";
+import engine, { extractFeatures, FEATURE_NAMES } from "./xgEngine";
 
 const openai = new OpenAI({
   apiKey: process.env.AI_INTEGRATIONS_OPENAI_API_KEY,
@@ -1880,6 +1881,77 @@ Output ONLY a valid JSON object. No markdown, no code blocks, no explanation out
           ? "AI insight is not available right now. Please check the AI key and URL, then try again."
           : "AI insight could not be generated right now. Please try again.",
       });
+    }
+  });
+
+  // ─── xG Engine: status ────────────────────────────────────────────────────
+  app.get("/api/engine/status", (_req: Request, res: Response) => {
+    try {
+      res.json(engine.getStatus());
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // ─── xG Engine: train ─────────────────────────────────────────────────────
+  let engineTrainingJob: { running: boolean; progress: number; message: string; error: string | null } = {
+    running: false, progress: 0, message: "Idle", error: null
+  };
+
+  app.post("/api/engine/train", async (_req: Request, res: Response) => {
+    if (engineTrainingJob.running) {
+      return res.status(409).json({ error: "Training already in progress" });
+    }
+    engineTrainingJob = { running: true, progress: 0, message: "Starting...", error: null };
+    res.json({ started: true });
+
+    (async () => {
+      try {
+        await engine.train((pct, msg) => {
+          engineTrainingJob.progress = pct;
+          engineTrainingJob.message = msg;
+        });
+        engineTrainingJob.running = false;
+        engineTrainingJob.progress = 100;
+        engineTrainingJob.message = "Training complete!";
+      } catch (err: any) {
+        engineTrainingJob.running = false;
+        engineTrainingJob.error = err.message;
+        engineTrainingJob.message = "Training failed";
+      }
+    })();
+  });
+
+  app.get("/api/engine/training-progress", (_req: Request, res: Response) => {
+    res.json(engineTrainingJob);
+  });
+
+  // ─── xG Engine: predict for stored match ──────────────────────────────────
+  app.get("/api/engine/predict/:eventId", (req: Request, res: Response) => {
+    try {
+      const row: any = db.prepare("SELECT * FROM match_simulations WHERE event_id = ?")
+        .get(Number(req.params.eventId));
+      if (!row) return res.status(404).json({ error: "Match not found in database" });
+      const prediction = engine.predictFromRow(row);
+      res.json({ prediction, matchInfo: {
+        homeTeam: row.home_team_name, awayTeam: row.away_team_name,
+        homeGoals: row.home_goals, awayGoals: row.away_goals,
+        result: row.result, matchDate: row.match_date,
+        tournament: row.tournament,
+      }});
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // ─── xG Engine: predict from raw simulation features ──────────────────────
+  app.post("/api/engine/predict-features", (req: Request, res: Response) => {
+    try {
+      const features = req.body as Record<string, any>;
+      const prediction = engine.predictFromRow(features);
+      res.json({ prediction });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
     }
   });
 

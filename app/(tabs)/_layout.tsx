@@ -26,6 +26,10 @@ function NativeTabLayout() {
         <Icon sf={{ default: "cylinder", selected: "cylinder.fill" }} />
         <Label>Database</Label>
       </NativeTabs.Trigger>
+      <NativeTabs.Trigger name="engine">
+        <Icon sf={{ default: "brain", selected: "brain.filled.head.profile" }} />
+        <Label>Engine</Label>
+      </NativeTabs.Trigger>
     </NativeTabs>
   );
 }
@@ -100,6 +104,15 @@ function ClassicTabLayout() {
           title: "Database",
           tabBarIcon: ({ color, size }) => (
             <Ionicons name="server-outline" size={size} color={color} />
+          ),
+        }}
+      />
+      <Tabs.Screen
+        name="engine"
+        options={{
+          title: "Engine",
+          tabBarIcon: ({ color, size }) => (
+            <Ionicons name="analytics-outline" size={size} color={color} />
           ),
         }}
       />

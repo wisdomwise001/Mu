@@ -20,3 +20,10 @@
   - **Processing tab**: pick any past date + sport → "Bulk Upload" starts a background job; matches are processed one at a time with 2.5 s delays (anti-blocking); live progress bar + log; cancel support.
   - **Database tab**: browse all stored match records with search, expandable simulation stats per match (form, scoring, defending, xG, possession, shots, pass accuracy, etc.) and actual outcomes; delete individual records.
   - Schema: `server/db.ts`; API routes added to `server/routes.ts` (`/api/database/*`).
+- Added **xG Engine** — a multi-paradigm probabilistic xG forecasting system implemented from scratch in TypeScript (`server/xgEngine.ts`):
+  - **Architecture**: ANN (neural network baseline) → HMM (match state) → SVM (boundary correction) → RF + GBM (ensemble refinement) → GP (uncertainty) → GARCH (volatility) → Causal (delta) → Meta-Learner (combination).
+  - **Engine Training tab**: New `app/(tabs)/engine.tsx` tab — shows training status, performance metrics (RMSE, MAE), training button with live progress bar, and architecture documentation for all 9 model components.
+  - **xG Engine tab in match detail**: New `components/match/XGEngineTab.tsx` — when a match is clicked, shows full-time/first-half/second-half xG predictions with GP confidence intervals, HMM match state chart, GARCH volatility, SVM correction, causal analysis, meta-learner weights, component-level breakdown, and all 38 features used.
+  - **Outputs**: home/away FT xG, H1 xG, H2 xG, GP confidence ±, volatility label, HMM match state + state probabilities, BTTS probability, Over 2.5 probability, result probabilities, causal Δ explanations.
+  - **Storage**: Trained model weights serialized to SQLite `engine_models` table for persistence across server restarts.
+  - **API routes**: `GET /api/engine/status`, `POST /api/engine/train`, `GET /api/engine/training-progress`, `GET /api/engine/predict/:eventId`, `POST /api/engine/predict-features`.
