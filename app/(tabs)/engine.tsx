@@ -59,7 +59,7 @@ function ModelBadge({ name, description, role, color, lib }: { name: string; des
 }
 
 const MODELS = [
-  { name: "ANN", description: "@tensorflow/tfjs — Real TensorFlow neural network (D→64→32→6, ReLU activations). Trained with Adam optimizer (adaptive per-parameter learning rates, β₁=0.9 β₂=0.999) for 200 epochs with dropout regularisation. Produces baseline xG for all 6 outputs.", role: "Baseline xG", color: "#60a5fa", lib: "@tensorflow/tfjs" },
+  { name: "ANN", description: "@tensorflow/tfjs — Real TensorFlow neural network (92→128→64→32→6, ReLU activations). Trained with Adam optimizer (adaptive per-parameter learning rates, β₁=0.9 β₂=0.999) for 200 epochs with dropout regularisation. Produces baseline xG for all 6 outputs.", role: "Baseline xG", color: "#60a5fa", lib: "@tensorflow/tfjs" },
   { name: "HMM", description: "Custom Gaussian HMM with 5 latent match states (very_defensive → very_attacking). States are initialised via sorted goal-output clustering; emissions fit Gaussian distributions per cluster. Viterbi-style decoding outputs the most probable match state and a per-state scaling factor.", role: "Match State", color: "#a78bfa", lib: "Custom Gaussian HMM" },
   { name: "GP", description: "ml-matrix — Gaussian Process with Squared Exponential (RBF) kernel. Uses median heuristic for length-scale, 60 Nyström inducing points, and ml-matrix pseudo-inverse for the posterior variance: σ²(x*) = k**  − k_*ᵀ K⁻¹ k_*. Reports true epistemic uncertainty.", role: "Uncertainty", color: "#34d399", lib: "ml-matrix" },
   { name: "GARCH", description: "Custom GARCH(1,1) — σ²_t = ω + α·ε²_{t-1} + β·σ²_{t-1}. Fits ω, α=0.15, β=0.75 to goal-scoring residuals from the training set. Converts conditional variance into a multiplicative volatility factor (Low / Medium / High).", role: "Volatility", color: "#fbbf24", lib: "Custom GARCH(1,1)" },
@@ -242,7 +242,7 @@ export default function EngineScreen() {
       </TouchableOpacity>
 
       <Text style={styles.trainHint}>
-        Trains on all {status?.trainingSamples ?? "stored"} historical matches in your database. All 9 models are trained end-to-end using real ML libraries.
+        Trains on all {status?.trainingSamples ?? "stored"} historical matches using 92 features — full match, first-half, second-half stats, role strengths and form. All 9 models trained end-to-end.
       </Text>
 
       {status?.trained && (

@@ -28,29 +28,61 @@ db.exec(`
   )
 `);
 
-// ─── Feature names (38 features) ─────────────────────────────────────────────
+// ─── Feature names (92 features — all available DB columns) ──────────────────
 export const FEATURE_NAMES = [
+  // ── Full-match averages (last 15) ──────────────────────────────────────────
   "home_avg_xg", "away_avg_xg",
   "home_avg_goals_scored", "away_avg_goals_scored",
   "home_avg_goals_conceded", "away_avg_goals_conceded",
   "home_avg_big_chances", "away_avg_big_chances",
+  "home_avg_big_chances_scored", "away_avg_big_chances_scored",
+  "home_avg_big_chances_missed", "away_avg_big_chances_missed",
+  "home_avg_total_shots", "away_avg_total_shots",
   "home_avg_shots_on_target", "away_avg_shots_on_target",
+  "home_avg_shots_off_target", "away_avg_shots_off_target",
+  "home_avg_blocked_shots", "away_avg_blocked_shots",
   "home_avg_shots_inside_box", "away_avg_shots_inside_box",
   "home_avg_possession", "away_avg_possession",
   "home_avg_pass_accuracy", "away_avg_pass_accuracy",
+  "home_avg_total_passes", "away_avg_total_passes",
+  "home_avg_corner_kicks", "away_avg_corner_kicks",
+  "home_avg_fouls", "away_avg_fouls",
+  "home_avg_duels_won", "away_avg_duels_won",
+  "home_avg_tackles_won", "away_avg_tackles_won",
+  "home_avg_interceptions", "away_avg_interceptions",
+  "home_avg_clearances", "away_avg_clearances",
+  "home_avg_goalkeeper_saves", "away_avg_goalkeeper_saves",
+  "home_avg_goals_prevented", "away_avg_goals_prevented",
+  // ── Role strengths (last 15) ───────────────────────────────────────────────
   "home_phase_attack", "away_phase_attack",
   "home_phase_defensive", "away_phase_defensive",
   "home_phase_midfield", "away_phase_midfield",
+  "home_phase_keeper", "away_phase_keeper",
+  "home_phase_fullback", "away_phase_fullback",
+  // ── Form strengths (last 7) ────────────────────────────────────────────────
   "home_form_strength", "away_form_strength",
   "home_scoring_strength", "away_scoring_strength",
   "home_defending_strength", "away_defending_strength",
-  "home_avg_goalkeeper_saves", "away_avg_goalkeeper_saves",
+  "home_form_points", "away_form_points",
+  "home_clean_sheets", "away_clean_sheets",
+  // ── 1st-half averages ──────────────────────────────────────────────────────
   "home_h1_avg_xg", "away_h1_avg_xg",
   "home_h1_avg_goals_scored", "away_h1_avg_goals_scored",
+  "home_h1_avg_goals_conceded", "away_h1_avg_goals_conceded",
   "home_h1_avg_big_chances", "away_h1_avg_big_chances",
   "home_h1_avg_total_shots", "away_h1_avg_total_shots",
+  "home_h1_avg_possession", "away_h1_avg_possession",
+  "home_h1_avg_pass_accuracy", "away_h1_avg_pass_accuracy",
+  // ── 2nd-half averages ──────────────────────────────────────────────────────
+  "home_h2_avg_xg", "away_h2_avg_xg",
+  "home_h2_avg_goals_scored", "away_h2_avg_goals_scored",
+  "home_h2_avg_goals_conceded", "away_h2_avg_goals_conceded",
+  "home_h2_avg_big_chances", "away_h2_avg_big_chances",
+  "home_h2_avg_total_shots", "away_h2_avg_total_shots",
+  "home_h2_avg_possession", "away_h2_avg_possession",
+  "home_h2_avg_pass_accuracy", "away_h2_avg_pass_accuracy",
 ];
-export const N_FEATURES = FEATURE_NAMES.length;
+export const N_FEATURES = FEATURE_NAMES.length; // 92
 
 export const TARGET_NAMES = [
   "home_ft_xg", "away_ft_xg",
@@ -123,7 +155,12 @@ interface ANNState {
 async function buildANNModel(inputDim: number): Promise<tf.LayersModel> {
   const model = tf.sequential();
   model.add(tf.layers.dense({
-    units: 64, activation: "relu", inputShape: [inputDim],
+    units: 128, activation: "relu", inputShape: [inputDim],
+    kernelInitializer: "heNormal",
+  }));
+  model.add(tf.layers.dropout({ rate: 0.15 }));
+  model.add(tf.layers.dense({
+    units: 64, activation: "relu",
     kernelInitializer: "heNormal",
   }));
   model.add(tf.layers.dropout({ rate: 0.1 }));
@@ -131,7 +168,6 @@ async function buildANNModel(inputDim: number): Promise<tf.LayersModel> {
     units: 32, activation: "relu",
     kernelInitializer: "heNormal",
   }));
-  model.add(tf.layers.dropout({ rate: 0.1 }));
   model.add(tf.layers.dense({
     units: N_TARGETS, activation: "relu",
     kernelInitializer: "glorotNormal",
@@ -223,7 +259,9 @@ const HMM_XG_FACTOR: Record<HMMState, number> = {
   very_attacking: 1.40,
 };
 
-const HMM_FEATURE_IDX = [0, 1, 2, 3, 4, 5, 16, 17]; // xg, goals, conceded, attack
+// xg(0,1), goals_scored(2,3), goals_conceded(4,5), big_chances(6,7),
+// phase_attack(44,45), form_strength(54,55), h1_xg(64,65), h2_xg(78,79)
+const HMM_FEATURE_IDX = [0, 1, 2, 3, 4, 5, 6, 7, 44, 45, 54, 55, 64, 65, 78, 79];
 
 interface HMMModel {
   means: number[][];
@@ -549,10 +587,15 @@ function gbmPredict(normX: number[], gbm: ReturnType<typeof restoreGBM>): number
 interface CausalState { modelJson: string; featureMeans: number[] }
 
 const CAUSAL_KEY_FEATURES = [
+  "home_avg_xg", "away_avg_xg",
   "home_phase_defensive", "away_phase_defensive",
+  "home_phase_attack", "away_phase_attack",
   "home_scoring_strength", "away_scoring_strength",
+  "home_defending_strength", "away_defending_strength",
   "home_form_strength", "away_form_strength",
   "home_avg_big_chances", "away_avg_big_chances",
+  "home_h1_avg_xg", "away_h1_avg_xg",
+  "home_h2_avg_xg", "away_h2_avg_xg",
 ];
 
 function fitCausal(normFeatures: number[][], targets: number[][]): {
