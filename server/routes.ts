@@ -589,8 +589,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
         function parseStatNum(value: any): number | null {
           if (value === null || value === undefined || value === "") return null;
-          const str = String(value).replace(/[^0-9.\-]/g, "");
-          const num = parseFloat(str);
+          const str = String(value).trim();
+          // Handle "X/Y" fraction format — return the numerator (e.g. "518/639" → 518)
+          const slashIdx = str.indexOf("/");
+          if (slashIdx > 0) {
+            const numerator = parseFloat(str.slice(0, slashIdx).replace(/[^0-9.]/g, ""));
+            return Number.isFinite(numerator) ? numerator : null;
+          }
+          const clean = str.replace(/[^0-9.\-]/g, "");
+          const num = parseFloat(clean);
           return Number.isFinite(num) ? num : null;
         }
 
@@ -601,8 +608,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
           for (const group of (periodData.groups || [])) {
             for (const item of (group.statisticsItems || [])) {
               const rawName = (item.name || "").toLowerCase().trim();
+              if (!rawName) continue;
               const val = parseStatNum(item[side]);
-              if (rawName && val !== null) statMap[rawName] = val;
+              if (val !== null) statMap[rawName] = val;
+              // Also derive a percentage variant from API-provided percentage or value/total
+              const sidePct = side === "home" ? item.homePercentage : item.awayPercentage;
+              const sideVal = side === "home" ? item.homeValue : item.awayValue;
+              const sideTotal = side === "home" ? item.homeTotal : item.awayTotal;
+              if (sidePct !== null && sidePct !== undefined && Number.isFinite(Number(sidePct))) {
+                statMap[rawName + " %"] = Number(sidePct);
+              } else if (sideVal != null && sideTotal != null && Number(sideTotal) > 0) {
+                const pct = Math.round((Number(sideVal) / Number(sideTotal)) * 1000) / 10;
+                statMap[rawName + " %"] = pct;
+              }
             }
           }
           return statMap;
@@ -703,14 +721,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
             addS("cornerKicks", get(["corner kicks"]));
             addS("goalkeeperSaves", get(["goalkeeper saves"]));
             addS("goalsPrevented", get(["goals prevented"]));
-            addS("passAccuracy", get(["pass accuracy", "passes %", "accurate passes %"]));
-            addS("tacklesWon", get(["tackles won", "tackles %"]));
+            addS("passAccuracy", get(["pass accuracy", "passes %", "accurate passes %", "accurate passes %"]));
+            addS("tacklesWon", get(["tackles won", "tackles %", "tackles won %"]));
             addS("interceptions", get(["interceptions"]));
             addS("clearances", get(["clearances"]));
             addS("fouls", get(["fouls"]));
-            addS("totalPasses", get(["total passes", "passes"]));
+            addS("totalPasses", get(["total passes", "passes", "accurate passes"]));
             addS("touchesOpBox", get(["touches in opposition box", "touches in opp. box"]));
-            addS("duelsWon", get(["total duels won", "duels won"]));
+            addS("duelsWon", get(["total duels won", "duels won", "duels %", "duels"]));
           });
 
           return { samples, matchesWithStats, goalScored, goalConceded };

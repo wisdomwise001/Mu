@@ -7,7 +7,7 @@ import {
   ActivityIndicator,
   ScrollView,
   Platform,
-  TextInput,
+  Modal,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
@@ -37,6 +37,128 @@ function todayString() {
   return `${y}-${m}-${day}`;
 }
 
+function parseDate(str: string): Date | null {
+  const m = str.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return null;
+  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  return isNaN(d.getTime()) ? null : d;
+}
+
+function formatDateDisplay(str: string): string {
+  const d = parseDate(str);
+  if (!d) return str;
+  return d.toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
+}
+
+const MONTHS = ["January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December"];
+const DAY_LABELS = ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"];
+
+function CalendarModal({ visible, value, onSelect, onClose }: {
+  visible: boolean;
+  value: string;
+  onSelect: (date: string) => void;
+  onClose: () => void;
+}) {
+  const parsed = parseDate(value);
+  const today = new Date();
+  const [viewYear, setViewYear] = useState(parsed ? parsed.getFullYear() : today.getFullYear());
+  const [viewMonth, setViewMonth] = useState(parsed ? parsed.getMonth() : today.getMonth());
+
+  const selectedStr = value;
+
+  function prevMonth() {
+    if (viewMonth === 0) { setViewMonth(11); setViewYear(y => y - 1); }
+    else setViewMonth(m => m - 1);
+  }
+  function nextMonth() {
+    if (viewMonth === 11) { setViewMonth(0); setViewYear(y => y + 1); }
+    else setViewMonth(m => m + 1);
+  }
+
+  const firstDay = new Date(viewYear, viewMonth, 1).getDay();
+  const daysInMonth = new Date(viewYear, viewMonth + 1, 0).getDate();
+
+  const cells: (number | null)[] = [];
+  for (let i = 0; i < firstDay; i++) cells.push(null);
+  for (let d = 1; d <= daysInMonth; d++) cells.push(d);
+  while (cells.length % 7 !== 0) cells.push(null);
+
+  function handleDay(day: number) {
+    const y = String(viewYear);
+    const m = String(viewMonth + 1).padStart(2, "0");
+    const d = String(day).padStart(2, "0");
+    onSelect(`${y}-${m}-${d}`);
+    onClose();
+  }
+
+  const todayY = today.getFullYear();
+  const todayM = today.getMonth();
+  const todayD = today.getDate();
+
+  return (
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
+      <TouchableOpacity style={cal.backdrop} activeOpacity={1} onPress={onClose}>
+        <TouchableOpacity activeOpacity={1} style={cal.sheet}>
+          {/* Header */}
+          <View style={cal.header}>
+            <TouchableOpacity onPress={prevMonth} style={cal.navBtn}>
+              <Ionicons name="chevron-back" size={20} color="#93c5fd" />
+            </TouchableOpacity>
+            <Text style={cal.monthYear}>{MONTHS[viewMonth]} {viewYear}</Text>
+            <TouchableOpacity onPress={nextMonth} style={cal.navBtn}>
+              <Ionicons name="chevron-forward" size={20} color="#93c5fd" />
+            </TouchableOpacity>
+          </View>
+
+          {/* Day labels */}
+          <View style={cal.weekRow}>
+            {DAY_LABELS.map(l => (
+              <Text key={l} style={cal.dayLabel}>{l}</Text>
+            ))}
+          </View>
+
+          {/* Days grid */}
+          <View style={cal.grid}>
+            {cells.map((day, idx) => {
+              if (!day) return <View key={idx} style={cal.dayCell} />;
+              const thisStr = `${viewYear}-${String(viewMonth + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+              const isSelected = thisStr === selectedStr;
+              const isToday = viewYear === todayY && viewMonth === todayM && day === todayD;
+              const isFuture = new Date(viewYear, viewMonth, day) > today;
+              return (
+                <TouchableOpacity
+                  key={idx}
+                  style={[cal.dayCell, isSelected && cal.dayCellSelected, isToday && !isSelected && cal.dayCellToday]}
+                  onPress={() => !isFuture && handleDay(day)}
+                  activeOpacity={isFuture ? 1 : 0.7}
+                  disabled={isFuture}
+                >
+                  <Text style={[
+                    cal.dayText,
+                    isSelected && cal.dayTextSelected,
+                    isToday && !isSelected && cal.dayTextToday,
+                    isFuture && cal.dayTextFuture,
+                  ]}>{day}</Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+
+          {/* Today shortcut */}
+          <TouchableOpacity style={cal.todayBtn} onPress={() => {
+            const t = todayString();
+            onSelect(t);
+            onClose();
+          }}>
+            <Text style={cal.todayBtnText}>Jump to Today</Text>
+          </TouchableOpacity>
+        </TouchableOpacity>
+      </TouchableOpacity>
+    </Modal>
+  );
+}
+
 function ProgressBar({ value, total }: { value: number; total: number }) {
   const pct = total > 0 ? Math.min(1, value / total) : 0;
   return (
@@ -50,6 +172,7 @@ export default function ProcessingScreen() {
   const insets = useSafeAreaInsets();
   const qc = useQueryClient();
   const [date, setDate] = useState(todayString());
+  const [calVisible, setCalVisible] = useState(false);
   const [sport, setSport] = useState<"football" | "basketball">("football");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -75,7 +198,7 @@ export default function ProcessingScreen() {
 
   async function startJob() {
     if (!date.match(/^\d{4}-\d{2}-\d{2}$/)) {
-      setError("Enter a valid date in YYYY-MM-DD format");
+      setError("Please select a valid date");
       return;
     }
     setError(null);
@@ -149,23 +272,23 @@ export default function ProcessingScreen() {
         contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: botPad + 100 }}
         keyboardShouldPersistTaps="handled"
       >
-        {/* Date input */}
+        {/* Date picker */}
         <View style={styles.section}>
           <Text style={styles.sectionLabel}>Date</Text>
-          <View style={styles.inputRow}>
-            <Ionicons name="calendar-outline" size={18} color="#6b7280" style={{ marginRight: 8 }} />
-            <TextInput
-              style={styles.dateInput}
-              value={date}
-              onChangeText={setDate}
-              placeholder="YYYY-MM-DD"
-              placeholderTextColor="#6b7280"
-              keyboardType="numbers-and-punctuation"
-              maxLength={10}
-            />
-          </View>
-          <Text style={styles.hint}>Enter any past date with finished matches</Text>
+          <TouchableOpacity style={styles.dateBtn} onPress={() => setCalVisible(true)} activeOpacity={0.8}>
+            <Ionicons name="calendar-outline" size={20} color="#60a5fa" />
+            <Text style={styles.dateBtnText}>{formatDateDisplay(date)}</Text>
+            <Ionicons name="chevron-down" size={16} color="#6b7280" />
+          </TouchableOpacity>
+          <Text style={styles.hint}>Select any past date with finished matches</Text>
         </View>
+
+        <CalendarModal
+          visible={calVisible}
+          value={date}
+          onSelect={setDate}
+          onClose={() => setCalVisible(false)}
+        />
 
         {/* Sport selector */}
         <View style={styles.section}>
@@ -304,17 +427,18 @@ const styles = StyleSheet.create({
   subtitle: { fontSize: 13, color: "#6b7280", marginTop: 2 },
   section: { marginBottom: 20 },
   sectionLabel: { fontSize: 12, fontWeight: "600", color: "#9ca3af", marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.5 },
-  inputRow: {
+  dateBtn: {
     flexDirection: "row",
     alignItems: "center",
+    gap: 12,
     backgroundColor: "#1f2937",
-    borderRadius: 10,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
+    borderRadius: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
     borderWidth: 1,
     borderColor: "#374151",
   },
-  dateInput: { flex: 1, color: "#f9fafb", fontSize: 16, fontWeight: "500" },
+  dateBtnText: { flex: 1, color: "#f9fafb", fontSize: 16, fontWeight: "500" },
   hint: { fontSize: 12, color: "#4b5563", marginTop: 6 },
   sportRow: { flexDirection: "row", gap: 10 },
   sportBtn: {
@@ -411,4 +535,72 @@ const styles = StyleSheet.create({
   logTitle: { fontSize: 11, fontWeight: "600", color: "#6b7280", marginBottom: 8, textTransform: "uppercase" },
   logScroll: { maxHeight: 280 },
   logLine: { fontSize: 12, color: "#9ca3af", lineHeight: 20, fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace" },
+});
+
+const cal = StyleSheet.create({
+  backdrop: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.7)",
+    justifyContent: "center",
+    alignItems: "center",
+    padding: 20,
+  },
+  sheet: {
+    backgroundColor: "#111827",
+    borderRadius: 18,
+    padding: 16,
+    width: "100%",
+    maxWidth: 340,
+    borderWidth: 1,
+    borderColor: "#1f2937",
+  },
+  header: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 16,
+  },
+  navBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: "#1f2937",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  monthYear: { fontSize: 16, fontWeight: "700", color: "#f9fafb" },
+  weekRow: {
+    flexDirection: "row",
+    marginBottom: 8,
+  },
+  dayLabel: {
+    flex: 1,
+    textAlign: "center",
+    fontSize: 11,
+    fontWeight: "600",
+    color: "#6b7280",
+    textTransform: "uppercase",
+  },
+  grid: { flexDirection: "row", flexWrap: "wrap" },
+  dayCell: {
+    width: `${100 / 7}%` as any,
+    aspectRatio: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 100,
+  },
+  dayCellSelected: { backgroundColor: "#3b82f6" },
+  dayCellToday: { backgroundColor: "#1f2937" },
+  dayText: { fontSize: 14, color: "#d1d5db", fontWeight: "500" },
+  dayTextSelected: { color: "#fff", fontWeight: "700" },
+  dayTextToday: { color: "#60a5fa", fontWeight: "700" },
+  dayTextFuture: { color: "#374151" },
+  todayBtn: {
+    marginTop: 14,
+    paddingVertical: 10,
+    borderRadius: 10,
+    backgroundColor: "#1f2937",
+    alignItems: "center",
+  },
+  todayBtnText: { fontSize: 13, fontWeight: "600", color: "#93c5fd" },
 });
