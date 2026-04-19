@@ -179,6 +179,64 @@ function MatchCard({ item, onDelete }: { item: M; onDelete: (id: number) => void
 
       {expanded && (
         <ScrollView style={styles.expandedScroll} nestedScrollEnabled>
+
+          {/* ── Match Summary ── */}
+          {(() => {
+            const hg = item.home_goals ?? null;
+            const ag = item.away_goals ?? null;
+            const hht = item.home_ht_goals ?? null;
+            const aht = item.away_ht_goals ?? null;
+            const result = item.result;
+            const resultLabel = result === "H" ? "1 (Home Win)" : result === "D" ? "X (Draw)" : result === "A" ? "2 (Away Win)" : "—";
+            const resultColor = result === "H" ? "#4ade80" : result === "D" ? "#facc15" : "#f87171";
+            const combined = hg != null && ag != null ? hg + ag : null;
+            const btts = hg != null && ag != null ? (hg > 0 && ag > 0 ? "Yes" : "No") : null;
+            const bttsColor = btts === "Yes" ? "#4ade80" : "#f87171";
+            let highestHalf = "—";
+            if (hht != null && aht != null && hg != null && ag != null) {
+              const h1goals = hht + aht;
+              const h2goals = (hg - hht) + (ag - aht);
+              highestHalf = h1goals > h2goals ? "1st Half" : h1goals < h2goals ? "2nd Half" : "Equal";
+            }
+            return (
+              <View style={styles.matchSummaryBox}>
+                <SectionHeader label="Match Summary" />
+                <View style={styles.summaryGrid}>
+                  <View style={styles.summaryCell}>
+                    <Text style={styles.summaryCellLabel}>Result</Text>
+                    <Text style={[styles.summaryCellValue, { color: resultColor }]}>{resultLabel}</Text>
+                  </View>
+                  <View style={styles.summaryCell}>
+                    <Text style={styles.summaryCellLabel}>Combined Goals</Text>
+                    <Text style={styles.summaryCellValue}>{combined != null ? String(combined) : "—"}</Text>
+                  </View>
+                  <View style={styles.summaryCell}>
+                    <Text style={styles.summaryCellLabel}>Home Goals</Text>
+                    <Text style={[styles.summaryCellValue, { color: "#60a5fa" }]}>{hg != null ? String(hg) : "—"}</Text>
+                  </View>
+                  <View style={styles.summaryCell}>
+                    <Text style={styles.summaryCellLabel}>Away Goals</Text>
+                    <Text style={[styles.summaryCellValue, { color: "#f87171" }]}>{ag != null ? String(ag) : "—"}</Text>
+                  </View>
+                  <View style={styles.summaryCell}>
+                    <Text style={styles.summaryCellLabel}>BTTS</Text>
+                    <Text style={[styles.summaryCellValue, { color: bttsColor }]}>{btts ?? "—"}</Text>
+                  </View>
+                  <View style={styles.summaryCell}>
+                    <Text style={styles.summaryCellLabel}>Highest Scoring Half</Text>
+                    <Text style={styles.summaryCellValue}>{highestHalf}</Text>
+                  </View>
+                  {hht != null && aht != null && (
+                    <View style={styles.summaryCell}>
+                      <Text style={styles.summaryCellLabel}>Half-Time Score</Text>
+                      <Text style={styles.summaryCellValue}>{hht} – {aht}</Text>
+                    </View>
+                  )}
+                </View>
+              </View>
+            );
+          })()}
+
           {/* Column headers */}
           <View style={styles.teamHeaderRow}>
             <Text style={[styles.teamHeaderName, styles.homeCol]} numberOfLines={1}>{item.home_team_name}</Text>
@@ -222,53 +280,75 @@ function MatchCard({ item, onDelete }: { item: M; onDelete: (id: number) => void
             }} />
           </View>
 
-          {/* ── Match stats table ── */}
-          <SectionHeader label={`Team Match Stats · ${analyzed} matches · ${statsCount}/${analyzed} with full data`} />
-
-          {/* Column labels */}
+          {/* ── Full Match Stats ── */}
+          <SectionHeader label={`Avg Full Match Stats · Last ${analyzed} matches`} />
           <View style={styles.statsLabelRow}>
             <Text style={[styles.statsLabelText, styles.homeCol]}>Home</Text>
-            <Text style={styles.cmpLabel}>Avg Full Match</Text>
+            <Text style={styles.cmpLabel}>Stat</Text>
             <Text style={[styles.statsLabelText, styles.awayCol]}>Away</Text>
           </View>
-
           <CmpRow label="Goals Scored" home={fmt(h("avg_goals_scored"))} away={fmt(a("avg_goals_scored"))} highlight />
           <CmpRow label="Goals Conceded" home={fmt(h("avg_goals_conceded"))} away={fmt(a("avg_goals_conceded"))} />
-
-          <View style={styles.groupLabel}><Text style={styles.groupLabelText}>Match Overview</Text></View>
-          <CmpRow label="Possession" home={fmtPct(h("avg_possession"))} away={fmtPct(a("avg_possession"))} />
-          <CmpRow label="Expected Goals (xG)" home={fmt(h("avg_xg"))} away={fmt(a("avg_xg"))} />
+          <View style={styles.groupLabel}><Text style={styles.groupLabelText}>Attack</Text></View>
+          <CmpRow label="xG" home={fmt(h("avg_xg"))} away={fmt(a("avg_xg"))} />
           <CmpRow label="Big Chances" home={fmt(h("avg_big_chances"))} away={fmt(a("avg_big_chances"))} />
           <CmpRow label="Total Shots" home={fmt(h("avg_total_shots"))} away={fmt(a("avg_total_shots"))} />
-          <CmpRow label="Corner Kicks" home={fmt(h("avg_corner_kicks"))} away={fmt(a("avg_corner_kicks"))} />
-          <CmpRow label="Fouls" home={fmt(h("avg_fouls"))} away={fmt(a("avg_fouls"))} />
-
-          <View style={styles.groupLabel}><Text style={styles.groupLabelText}>Shooting</Text></View>
           <CmpRow label="Shots on Target" home={fmt(h("avg_shots_on_target"))} away={fmt(a("avg_shots_on_target"))} />
           <CmpRow label="Shots off Target" home={fmt(h("avg_shots_off_target"))} away={fmt(a("avg_shots_off_target"))} />
           <CmpRow label="Blocked Shots" home={fmt(h("avg_blocked_shots"))} away={fmt(a("avg_blocked_shots"))} />
           <CmpRow label="Shots Inside Box" home={fmt(h("avg_shots_inside_box"))} away={fmt(a("avg_shots_inside_box"))} />
           <CmpRow label="Big Chances Scored" home={fmt(h("avg_big_chances_scored"))} away={fmt(a("avg_big_chances_scored"))} />
           <CmpRow label="Big Chances Missed" home={fmt(h("avg_big_chances_missed"))} away={fmt(a("avg_big_chances_missed"))} />
-
+          <CmpRow label="Corner Kicks" home={fmt(h("avg_corner_kicks"))} away={fmt(a("avg_corner_kicks"))} />
           <View style={styles.groupLabel}><Text style={styles.groupLabelText}>Passing</Text></View>
           <CmpRow label="Pass Accuracy" home={h("avg_pass_accuracy") != null ? fmtPct(h("avg_pass_accuracy")) : "—"} away={a("avg_pass_accuracy") != null ? fmtPct(a("avg_pass_accuracy")) : "—"} />
           <CmpRow label="Total Passes" home={fmt(h("avg_total_passes"), 0)} away={fmt(a("avg_total_passes"), 0)} />
-
+          <CmpRow label="Possession" home={fmtPct(h("avg_possession"))} away={fmtPct(a("avg_possession"))} />
           <View style={styles.groupLabel}><Text style={styles.groupLabelText}>Defending</Text></View>
           <CmpRow label="Duels Won" home={fmt(h("avg_duels_won"))} away={fmt(a("avg_duels_won"))} />
           <CmpRow label="Tackles Won %" home={h("avg_tackles_won") != null ? fmtPct(h("avg_tackles_won")) : "—"} away={a("avg_tackles_won") != null ? fmtPct(a("avg_tackles_won")) : "—"} />
           <CmpRow label="Interceptions" home={fmt(h("avg_interceptions"))} away={fmt(a("avg_interceptions"))} />
           <CmpRow label="Clearances" home={fmt(h("avg_clearances"))} away={fmt(a("avg_clearances"))} />
-
+          <CmpRow label="Fouls" home={fmt(h("avg_fouls"))} away={fmt(a("avg_fouls"))} />
           <View style={styles.groupLabel}><Text style={styles.groupLabelText}>Goalkeeping</Text></View>
           <CmpRow label="GK Saves" home={fmt(h("avg_goalkeeper_saves"))} away={fmt(a("avg_goalkeeper_saves"))} />
           <CmpRow label="Goals Prevented" home={fmt(h("avg_goals_prevented"))} away={fmt(a("avg_goals_prevented"))} />
-
-          <View style={styles.groupLabel}><Text style={styles.groupLabelText}>Last 15 Matches Totals</Text></View>
+          <View style={styles.groupLabel}><Text style={styles.groupLabelText}>Last 15 Totals</Text></View>
           <CmpRow label="Total Goals Scored" home={h("goals_for") != null ? String(h("goals_for")) : "—"} away={a("goals_for") != null ? String(a("goals_for")) : "—"} highlight />
           <CmpRow label="Total Goals Conceded" home={h("goals_against") != null ? String(h("goals_against")) : "—"} away={a("goals_against") != null ? String(a("goals_against")) : "—"} />
           <CmpRow label="Total Clean Sheets" home={h("clean_sheets") != null ? String(h("clean_sheets")) : "—"} away={a("clean_sheets") != null ? String(a("clean_sheets")) : "—"} />
+
+          {/* ── 1st Half Stats ── */}
+          <SectionHeader label="Avg 1st Half Stats" />
+          <View style={styles.statsLabelRow}>
+            <Text style={[styles.statsLabelText, styles.homeCol]}>Home</Text>
+            <Text style={styles.cmpLabel}>Stat</Text>
+            <Text style={[styles.statsLabelText, styles.awayCol]}>Away</Text>
+          </View>
+          <CmpRow label="Goals Scored" home={fmt(item.home_h1_avg_goals_scored)} away={fmt(item.away_h1_avg_goals_scored)} highlight />
+          <CmpRow label="Goals Conceded" home={fmt(item.home_h1_avg_goals_conceded)} away={fmt(item.away_h1_avg_goals_conceded)} />
+          <CmpRow label="xG" home={fmt(item.home_h1_avg_xg)} away={fmt(item.away_h1_avg_xg)} />
+          <CmpRow label="Possession" home={fmtPct(item.home_h1_avg_possession)} away={fmtPct(item.away_h1_avg_possession)} />
+          <CmpRow label="Big Chances" home={fmt(item.home_h1_avg_big_chances)} away={fmt(item.away_h1_avg_big_chances)} />
+          <CmpRow label="Total Shots" home={fmt(item.home_h1_avg_total_shots)} away={fmt(item.away_h1_avg_total_shots)} />
+          <CmpRow label="Pass Accuracy" home={item.home_h1_avg_pass_accuracy != null ? fmtPct(item.home_h1_avg_pass_accuracy) : "—"} away={item.away_h1_avg_pass_accuracy != null ? fmtPct(item.away_h1_avg_pass_accuracy) : "—"} />
+          <CmpRow label="Total Passes" home={fmt(item.home_h1_avg_total_passes, 0)} away={fmt(item.away_h1_avg_total_passes, 0)} />
+
+          {/* ── 2nd Half Stats ── */}
+          <SectionHeader label="Avg 2nd Half Stats" />
+          <View style={styles.statsLabelRow}>
+            <Text style={[styles.statsLabelText, styles.homeCol]}>Home</Text>
+            <Text style={styles.cmpLabel}>Stat</Text>
+            <Text style={[styles.statsLabelText, styles.awayCol]}>Away</Text>
+          </View>
+          <CmpRow label="Goals Scored" home={fmt(item.home_h2_avg_goals_scored)} away={fmt(item.away_h2_avg_goals_scored)} highlight />
+          <CmpRow label="Goals Conceded" home={fmt(item.home_h2_avg_goals_conceded)} away={fmt(item.away_h2_avg_goals_conceded)} />
+          <CmpRow label="xG" home={fmt(item.home_h2_avg_xg)} away={fmt(item.away_h2_avg_xg)} />
+          <CmpRow label="Possession" home={fmtPct(item.home_h2_avg_possession)} away={fmtPct(item.away_h2_avg_possession)} />
+          <CmpRow label="Big Chances" home={fmt(item.home_h2_avg_big_chances)} away={fmt(item.away_h2_avg_big_chances)} />
+          <CmpRow label="Total Shots" home={fmt(item.home_h2_avg_total_shots)} away={fmt(item.away_h2_avg_total_shots)} />
+          <CmpRow label="Pass Accuracy" home={item.home_h2_avg_pass_accuracy != null ? fmtPct(item.home_h2_avg_pass_accuracy) : "—"} away={item.away_h2_avg_pass_accuracy != null ? fmtPct(item.away_h2_avg_pass_accuracy) : "—"} />
+          <CmpRow label="Total Passes" home={fmt(item.home_h2_avg_total_passes, 0)} away={fmt(item.away_h2_avg_total_passes, 0)} />
 
           {/* Delete */}
           <TouchableOpacity onPress={confirmDelete} style={styles.deleteBtn} activeOpacity={0.7}>
@@ -561,4 +641,13 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: "#7f1d1d",
   },
   deleteBtnText: { fontSize: 12, color: "#f87171", fontWeight: "600" },
+
+  // Match summary
+  matchSummaryBox: { backgroundColor: "#080d18" },
+  summaryGrid: { flexDirection: "row", flexWrap: "wrap", paddingHorizontal: 10, paddingBottom: 10 },
+  summaryCell: {
+    width: "50%", paddingHorizontal: 4, paddingVertical: 6,
+  },
+  summaryCellLabel: { fontSize: 10, color: "#6b7280", textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 2 },
+  summaryCellValue: { fontSize: 15, fontWeight: "700", color: "#f9fafb" },
 });

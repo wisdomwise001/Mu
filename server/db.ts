@@ -116,6 +116,50 @@ db.exec(`
     away_avg_goals_prevented    REAL,
     away_matches_analyzed       INTEGER,
 
+    -- Halftime scores (for BTTS / highest scoring half)
+    home_ht_goals               INTEGER,
+    away_ht_goals               INTEGER,
+
+    -- Home 1st half avg stats
+    home_h1_avg_goals_scored    REAL,
+    home_h1_avg_goals_conceded  REAL,
+    home_h1_avg_xg              REAL,
+    home_h1_avg_possession      REAL,
+    home_h1_avg_big_chances     REAL,
+    home_h1_avg_total_shots     REAL,
+    home_h1_avg_pass_accuracy   REAL,
+    home_h1_avg_total_passes    REAL,
+
+    -- Home 2nd half avg stats
+    home_h2_avg_goals_scored    REAL,
+    home_h2_avg_goals_conceded  REAL,
+    home_h2_avg_xg              REAL,
+    home_h2_avg_possession      REAL,
+    home_h2_avg_big_chances     REAL,
+    home_h2_avg_total_shots     REAL,
+    home_h2_avg_pass_accuracy   REAL,
+    home_h2_avg_total_passes    REAL,
+
+    -- Away 1st half avg stats
+    away_h1_avg_goals_scored    REAL,
+    away_h1_avg_goals_conceded  REAL,
+    away_h1_avg_xg              REAL,
+    away_h1_avg_possession      REAL,
+    away_h1_avg_big_chances     REAL,
+    away_h1_avg_total_shots     REAL,
+    away_h1_avg_pass_accuracy   REAL,
+    away_h1_avg_total_passes    REAL,
+
+    -- Away 2nd half avg stats
+    away_h2_avg_goals_scored    REAL,
+    away_h2_avg_goals_conceded  REAL,
+    away_h2_avg_xg              REAL,
+    away_h2_avg_possession      REAL,
+    away_h2_avg_big_chances     REAL,
+    away_h2_avg_total_shots     REAL,
+    away_h2_avg_pass_accuracy   REAL,
+    away_h2_avg_total_passes    REAL,
+
     processed_at                TEXT NOT NULL
   )
 `);
@@ -158,5 +202,40 @@ col("away_avg_duels_won", "REAL");
 col("away_avg_clearances", "REAL");
 col("away_avg_goalkeeper_saves", "REAL");
 col("away_avg_goals_prevented", "REAL");
+// New half-time and per-half columns
+col("home_ht_goals", "INTEGER");
+col("away_ht_goals", "INTEGER");
+col("home_h1_avg_goals_scored", "REAL");
+col("home_h1_avg_goals_conceded", "REAL");
+col("home_h1_avg_xg", "REAL");
+col("home_h1_avg_possession", "REAL");
+col("home_h1_avg_big_chances", "REAL");
+col("home_h1_avg_total_shots", "REAL");
+col("home_h1_avg_pass_accuracy", "REAL");
+col("home_h1_avg_total_passes", "REAL");
+col("home_h2_avg_goals_scored", "REAL");
+col("home_h2_avg_goals_conceded", "REAL");
+col("home_h2_avg_xg", "REAL");
+col("home_h2_avg_possession", "REAL");
+col("home_h2_avg_big_chances", "REAL");
+col("home_h2_avg_total_shots", "REAL");
+col("home_h2_avg_pass_accuracy", "REAL");
+col("home_h2_avg_total_passes", "REAL");
+col("away_h1_avg_goals_scored", "REAL");
+col("away_h1_avg_goals_conceded", "REAL");
+col("away_h1_avg_xg", "REAL");
+col("away_h1_avg_possession", "REAL");
+col("away_h1_avg_big_chances", "REAL");
+col("away_h1_avg_total_shots", "REAL");
+col("away_h1_avg_pass_accuracy", "REAL");
+col("away_h1_avg_total_passes", "REAL");
+col("away_h2_avg_goals_scored", "REAL");
+col("away_h2_avg_goals_conceded", "REAL");
+col("away_h2_avg_xg", "REAL");
+col("away_h2_avg_possession", "REAL");
+col("away_h2_avg_big_chances", "REAL");
+col("away_h2_avg_total_shots", "REAL");
+col("away_h2_avg_pass_accuracy", "REAL");
+col("away_h2_avg_total_passes", "REAL");
 
 export default db;

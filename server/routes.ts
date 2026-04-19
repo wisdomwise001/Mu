@@ -2018,6 +2018,10 @@ Output ONLY a valid JSON object. No markdown, no code blocks, no explanation out
           const aGoals = Number(awayScore);
           const result = hGoals > aGoals ? "H" : hGoals === aGoals ? "D" : "A";
 
+          // Halftime scores
+          const hHtGoals = event.homeScore?.period1 != null ? Number(event.homeScore.period1) : null;
+          const aHtGoals = event.awayScore?.period1 != null ? Number(event.awayScore.period1) : null;
+
           try {
             // Anti-blocking: 2.5s delay between each match
             await sleep(2500);
@@ -2035,7 +2039,11 @@ Output ONLY a valid JSON object. No markdown, no code blocks, no explanation out
             const h = sim.home;
             const a = sim.away;
             const hStats = h?.teamMatchStats?.all;
+            const hStats1h = h?.teamMatchStats?.firstHalf;
+            const hStats2h = h?.teamMatchStats?.secondHalf;
             const aStats = a?.teamMatchStats?.all;
+            const aStats1h = a?.teamMatchStats?.firstHalf;
+            const aStats2h = a?.teamMatchStats?.secondHalf;
             const hPhase = h?.phaseStrengths;
             const aPhase = a?.phaseStrengths;
             const hForm = h?.formSummary;
@@ -2064,13 +2072,23 @@ Output ONLY a valid JSON object. No markdown, no code blocks, no explanation out
                 away_avg_corner_kicks, away_avg_fouls, away_avg_total_passes, away_avg_pass_accuracy,
                 away_avg_duels_won, away_avg_tackles_won, away_avg_interceptions, away_avg_clearances,
                 away_avg_goalkeeper_saves, away_avg_goals_prevented, away_matches_analyzed,
+                home_ht_goals, away_ht_goals,
+                home_h1_avg_goals_scored, home_h1_avg_goals_conceded, home_h1_avg_xg, home_h1_avg_possession, home_h1_avg_big_chances, home_h1_avg_total_shots, home_h1_avg_pass_accuracy, home_h1_avg_total_passes,
+                home_h2_avg_goals_scored, home_h2_avg_goals_conceded, home_h2_avg_xg, home_h2_avg_possession, home_h2_avg_big_chances, home_h2_avg_total_shots, home_h2_avg_pass_accuracy, home_h2_avg_total_passes,
+                away_h1_avg_goals_scored, away_h1_avg_goals_conceded, away_h1_avg_xg, away_h1_avg_possession, away_h1_avg_big_chances, away_h1_avg_total_shots, away_h1_avg_pass_accuracy, away_h1_avg_total_passes,
+                away_h2_avg_goals_scored, away_h2_avg_goals_conceded, away_h2_avg_xg, away_h2_avg_possession, away_h2_avg_big_chances, away_h2_avg_total_shots, away_h2_avg_pass_accuracy, away_h2_avg_total_passes,
                 processed_at
               ) VALUES (
                 ?,?,?,?,?,?,?,?,?,?,?,?,
                 ?,?,?,?,?,?,?,?,?,?,?,?,?,
                 ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
                 ?,?,?,?,?,?,?,?,?,?,?,?,?,
-                ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
+                ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
+                ?,?,
+                ?,?,?,?,?,?,?,?,
+                ?,?,?,?,?,?,?,?,
+                ?,?,?,?,?,?,?,?,
+                ?,?,?,?,?,?,?,?,?
               )
             `).run(
               eventId, homeTeamId, homeTeamName, awayTeamId, awayTeamName,
@@ -2096,6 +2114,11 @@ Output ONLY a valid JSON object. No markdown, no code blocks, no explanation out
               aStats?.avgCornerKicks ?? null, aStats?.avgFouls ?? null, aStats?.avgTotalPasses ?? null, aStats?.avgPassAccuracy ?? null,
               aStats?.avgDuelsWon ?? null, aStats?.avgTacklesWon ?? null, aStats?.avgInterceptions ?? null, aStats?.avgClearances ?? null,
               aStats?.avgGoalkeeperSaves ?? null, aStats?.avgGoalsPrevented ?? null, a?.matchesAnalyzed ?? null,
+              hHtGoals, aHtGoals,
+              hStats1h?.avgGoalsScored ?? null, hStats1h?.avgGoalsConceded ?? null, hStats1h?.avgXg ?? null, hStats1h?.avgPossession ?? null, hStats1h?.avgBigChances ?? null, hStats1h?.avgTotalShots ?? null, hStats1h?.avgPassAccuracy ?? null, hStats1h?.avgTotalPasses ?? null,
+              hStats2h?.avgGoalsScored ?? null, hStats2h?.avgGoalsConceded ?? null, hStats2h?.avgXg ?? null, hStats2h?.avgPossession ?? null, hStats2h?.avgBigChances ?? null, hStats2h?.avgTotalShots ?? null, hStats2h?.avgPassAccuracy ?? null, hStats2h?.avgTotalPasses ?? null,
+              aStats1h?.avgGoalsScored ?? null, aStats1h?.avgGoalsConceded ?? null, aStats1h?.avgXg ?? null, aStats1h?.avgPossession ?? null, aStats1h?.avgBigChances ?? null, aStats1h?.avgTotalShots ?? null, aStats1h?.avgPassAccuracy ?? null, aStats1h?.avgTotalPasses ?? null,
+              aStats2h?.avgGoalsScored ?? null, aStats2h?.avgGoalsConceded ?? null, aStats2h?.avgXg ?? null, aStats2h?.avgPossession ?? null, aStats2h?.avgBigChances ?? null, aStats2h?.avgTotalShots ?? null, aStats2h?.avgPassAccuracy ?? null, aStats2h?.avgTotalPasses ?? null,
               new Date().toISOString(),
             );
 
