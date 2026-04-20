@@ -108,6 +108,7 @@ interface PeriodStats {
   avgTotalPasses: number | null;
   avgTouchesInOppositionBox: number | null;
   avgDuelsWon: number | null;
+  avgXgGotPerMatch: number | null;
   matchesWithStats: number;
 }
 
@@ -813,6 +814,7 @@ function buildStatRows(home?: PeriodStats | null, away?: PeriodStats | null) {
     { label: "Goals Conceded", homeVal: home?.avgGoalsConceded, awayVal: away?.avgGoalsConceded, higherIsBetter: false },
     { section: "Match Overview", label: "Possession", homeVal: home?.avgPossession, awayVal: away?.avgPossession, unit: "%", higherIsBetter: true },
     { label: "Expected Goals (xG)", homeVal: home?.avgXg, awayVal: away?.avgXg, higherIsBetter: true },
+    { label: "xG Got Per Match", homeVal: home?.avgXgGotPerMatch, awayVal: away?.avgXgGotPerMatch, higherIsBetter: true },
     { label: "Big Chances", homeVal: home?.avgBigChances, awayVal: away?.avgBigChances, higherIsBetter: true },
     { label: "Total Shots", homeVal: home?.avgTotalShots, awayVal: away?.avgTotalShots, higherIsBetter: true },
     { label: "Corner Kicks", homeVal: home?.avgCornerKicks, awayVal: away?.avgCornerKicks, higherIsBetter: true },

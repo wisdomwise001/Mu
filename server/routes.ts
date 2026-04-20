@@ -757,6 +757,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           avgTotalPasses: number | null;
           avgTouchesInOppositionBox: number | null;
           avgDuelsWon: number | null;
+          avgXgGotPerMatch: number | null;
           matchesWithStats: number;
         };
 
@@ -833,6 +834,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
               oppGet(["big chances"]),
             );
             addS("xg", customXG);
+
+            if (customXG !== null && teamGoals !== null) {
+              const resultFactor = (oppGoals !== null && teamGoals > oppGoals) ? 1.05
+                : (oppGoals !== null && teamGoals === oppGoals) ? 1.00 : 0.95;
+              const xgGot = (0.7 * customXG + 0.3 * teamGoals) * resultFactor;
+              addS("xgGotPerMatch", Math.round(xgGot * 100) / 100);
+            }
+
             addS("bigChances", get(["big chances"]));
             addS("totalShots", get(["total shots", "shots total"]));
             addS("shotsOnTarget", get(["shots on target"]));
@@ -904,6 +913,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
             avgTotalPasses: avg("totalPasses"),
             avgTouchesInOppositionBox: avg("touchesOpBox"),
             avgDuelsWon: avg("duelsWon"),
+            avgXgGotPerMatch: avg("xgGotPerMatch"),
             matchesWithStats,
           };
         }
