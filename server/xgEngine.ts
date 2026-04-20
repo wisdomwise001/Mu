@@ -128,7 +128,13 @@ export function fitScaler(data: number[][]): Scaler {
 }
 
 export function applyScaler(x: number[], s: Scaler): number[] {
-  return x.map((v, i) => (v - s.min[i]) / s.scale[i]);
+  return x.map((v, i) => {
+    const scaled = (v - s.min[i]) / s.scale[i];
+    // Hard-clamp to [0, 1]: features outside the training distribution (e.g. small-sided
+    // leagues with inflated xG/shots) are pinned to the training boundary rather than
+    // allowing the ANN to extrapolate into regions it has never seen.
+    return Math.max(0, Math.min(1, scaled));
+  });
 }
 
 // ─── Math helpers ─────────────────────────────────────────────────────────────
@@ -999,19 +1005,41 @@ class XGEngine {
     const svmResult = svmCorrect(normX, models.svm);
     const causalResult = causalAnalysis(normX, this.causalLive);
 
+    // Maximum realistic xG for a single team in standard football.
+    // These caps prevent inflated predictions when teams are from non-standard
+    // competitions (small-sided, futsal, fantasy leagues, etc.).
+    const MAX_FT = 4.5;
+    const MAX_HT = 2.8;
+
     // Final combination:
     //  meta × HMM factor (state-adjusted) + SVM correction + clamped causal delta
     //  Causal delta is clamped to ±0.3 goals and added after HMM scaling
     //  to prevent OLS extrapolation from inflating the final xG.
-    const combine = (meta: number, causalD: number) =>
-      Math.max(0, meta * hmmResult.factor + svmResult.correction + clamp(causalD * 0.08, -0.3, 0.3));
+    const combine = (meta: number, causalD: number, cap: number) =>
+      clamp(meta * hmmResult.factor + svmResult.correction + clamp(causalD * 0.08, -0.3, 0.3), 0, cap);
 
-    const hFt = combine(metaPred[0], causalResult.delta[0]);
-    const aFt = combine(metaPred[1], causalResult.delta[1]);
-    const hH1 = combine(metaPred[2], causalResult.delta[2]);
-    const aH1 = combine(metaPred[3], causalResult.delta[3]);
-    const hH2 = combine(metaPred[4], causalResult.delta[4]);
-    const aH2 = combine(metaPred[5], causalResult.delta[5]);
+    const hFt = combine(metaPred[0], causalResult.delta[0], MAX_FT);
+    const aFt = combine(metaPred[1], causalResult.delta[1], MAX_FT);
+    const hH1r = combine(metaPred[2], causalResult.delta[2], MAX_HT);
+    const aH1r = combine(metaPred[3], causalResult.delta[3], MAX_HT);
+    const hH2r = combine(metaPred[4], causalResult.delta[4], MAX_HT);
+    const aH2r = combine(metaPred[5], causalResult.delta[5], MAX_HT);
+
+    // Enforce FT = H1 + H2 consistency.
+    // The meta-learner predicts all six values independently which can produce
+    // mathematically impossible splits (e.g. H1=2.62, H2=0.00, FT=1.02).
+    // We keep FT as the authoritative prediction and rescale H1/H2 proportionally.
+    const reconcile = (ft: number, h1: number, h2: number): [number, number] => {
+      const sum = h1 + h2;
+      if (sum < 1e-6) {
+        // No half-time signal — split using typical football scoring ratio (45% / 55%)
+        return [+(ft * 0.45).toFixed(2), +(ft * 0.55).toFixed(2)];
+      }
+      const ratio = ft / sum;
+      return [+(h1 * ratio).toFixed(2), +(h2 * ratio).toFixed(2)];
+    };
+    const [hH1, hH2] = reconcile(hFt, hH1r, hH2r);
+    const [aH1, aH2] = reconcile(aFt, aH1r, aH2r);
 
     // Derived market probabilities (Poisson approximation)
     const totalXg = hFt + aFt;
