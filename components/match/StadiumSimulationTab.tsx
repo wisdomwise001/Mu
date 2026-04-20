@@ -84,6 +84,17 @@ interface FormSummary {
   recentForm: ("W" | "D" | "L")[];
 }
 
+interface GSRM {
+  ecri: number | null;
+  eri: number | null;
+  tgbi: number | null;
+  frqi: number | null;
+  ecriMatches: number;
+  eriMatches: number;
+  tgbiMatches: number;
+  frqiMatches: number;
+}
+
 interface PeriodStats {
   avgGoalsScored: number | null;
   avgGoalsConceded: number | null;
@@ -142,6 +153,7 @@ interface SimulationMetricsResponse {
     activeLast5Count?: number;
     matchesAnalyzed?: number;
     teamMatchStats?: TeamMatchStats;
+    gsrm?: GSRM | null;
   };
   away?: {
     formation?: string | null;
@@ -165,6 +177,7 @@ interface SimulationMetricsResponse {
     activeLast5Count?: number;
     matchesAnalyzed?: number;
     teamMatchStats?: TeamMatchStats;
+    gsrm?: GSRM | null;
   };
 }
 
@@ -838,6 +851,128 @@ function buildStatRows(home?: PeriodStats | null, away?: PeriodStats | null) {
   return rows;
 }
 
+function gsrmColor(val: number | null | undefined): string {
+  if (val == null) return Colors.dark.textSecondary;
+  if (val >= 7) return "#22c55e";
+  if (val >= 4) return "#eab308";
+  return "#ef4444";
+}
+
+function gsrmLabel(val: number | null | undefined): string {
+  if (val == null) return "—";
+  if (val >= 8.5) return "Elite";
+  if (val >= 7) return "Strong";
+  if (val >= 5) return "Average";
+  if (val >= 3) return "Weak";
+  return "Poor";
+}
+
+function GameIntelligenceCard({
+  homeTeamName,
+  awayTeamName,
+  homeGsrm,
+  awayGsrm,
+}: {
+  homeTeamName: string;
+  awayTeamName: string;
+  homeGsrm?: GSRM | null;
+  awayGsrm?: GSRM | null;
+}) {
+  if (!homeGsrm && !awayGsrm) return null;
+
+  const indices: {
+    key: keyof GSRM;
+    label: string;
+    desc: string;
+    matchesKey: keyof GSRM;
+    homeVal: number | null;
+    awayVal: number | null;
+    homeMatches: number;
+    awayMatches: number;
+  }[] = [
+    {
+      key: "ecri", label: "Early Concession Response", desc: "Aggression within 20–40 min of conceding first (before 30′)",
+      matchesKey: "ecriMatches",
+      homeVal: homeGsrm?.ecri ?? null, awayVal: awayGsrm?.ecri ?? null,
+      homeMatches: homeGsrm?.ecriMatches ?? 0, awayMatches: awayGsrm?.ecriMatches ?? 0,
+    },
+    {
+      key: "eri", label: "Equalizer Reaction", desc: "Push for winner vs settle after lead is cancelled",
+      matchesKey: "eriMatches",
+      homeVal: homeGsrm?.eri ?? null, awayVal: awayGsrm?.eri ?? null,
+      homeMatches: homeGsrm?.eriMatches ?? 0, awayMatches: awayGsrm?.eriMatches ?? 0,
+    },
+    {
+      key: "tgbi", label: "2-Goal Lead Behavior", desc: "Attack or protect when ahead by 2+ goals",
+      matchesKey: "tgbiMatches",
+      homeVal: homeGsrm?.tgbi ?? null, awayVal: awayGsrm?.tgbi ?? null,
+      homeMatches: homeGsrm?.tgbiMatches ?? 0, awayMatches: awayGsrm?.tgbiMatches ?? 0,
+    },
+    {
+      key: "frqi", label: "Pressure Finishing", desc: "Clinicality when trailing — scoring, equalizing, overturning",
+      matchesKey: "frqiMatches",
+      homeVal: homeGsrm?.frqi ?? null, awayVal: awayGsrm?.frqi ?? null,
+      homeMatches: homeGsrm?.frqiMatches ?? 0, awayMatches: awayGsrm?.frqiMatches ?? 0,
+    },
+  ];
+
+  const hasAnyData = indices.some(i => i.homeVal != null || i.awayVal != null);
+  if (!hasAnyData) return null;
+
+  return (
+    <View style={styles.phaseCard}>
+      <Text style={styles.cardLabel}>Game Intelligence · Behavioral Patterns</Text>
+      <View style={[styles.statsHeaderRow, { marginBottom: 4 }]}>
+        <Text style={[styles.statsHeaderTeam, { color: Colors.dark.homeKit }]} numberOfLines={1}>{homeTeamName}</Text>
+        <Text style={styles.statsHeaderLabel}>Index /10</Text>
+        <Text style={[styles.statsHeaderTeam, { color: Colors.dark.awayKit }]} numberOfLines={1}>{awayTeamName}</Text>
+      </View>
+      {indices.map((idx) => {
+        if (idx.homeVal == null && idx.awayVal == null) return null;
+        const hColor = gsrmColor(idx.homeVal);
+        const aColor = gsrmColor(idx.awayVal);
+        const hPct = idx.homeVal != null ? (idx.homeVal / 10) * 100 : 0;
+        const aPct = idx.awayVal != null ? (idx.awayVal / 10) * 100 : 0;
+        return (
+          <View key={idx.key} style={styles.gsrmRow}>
+            <View style={styles.gsrmSide}>
+              <Text style={[styles.gsrmScore, { color: hColor }]}>
+                {idx.homeVal != null ? idx.homeVal.toFixed(1) : "—"}
+              </Text>
+              <Text style={[styles.gsrmTag, { color: hColor }]}>
+                {gsrmLabel(idx.homeVal)}
+              </Text>
+            </View>
+            <View style={styles.gsrmCenter}>
+              <Text style={styles.gsrmLabel}>{idx.label}</Text>
+              <Text style={styles.gsrmDesc}>{idx.desc}</Text>
+              <View style={styles.gsrmBarRow}>
+                <View style={styles.gsrmBarTrack}>
+                  <View style={[styles.gsrmBarFillHome, { width: `${Math.max(hPct, 4)}%`, backgroundColor: hColor }]} />
+                </View>
+                <View style={styles.gsrmBarTrack}>
+                  <View style={[styles.gsrmBarFillAway, { width: `${Math.max(aPct, 4)}%`, backgroundColor: aColor }]} />
+                </View>
+              </View>
+              <Text style={styles.gsrmMatchCount}>
+                {idx.homeMatches > 0 ? `${idx.homeMatches} matches` : "no triggers"} · {idx.awayMatches > 0 ? `${idx.awayMatches} matches` : "no triggers"}
+              </Text>
+            </View>
+            <View style={styles.gsrmSideRight}>
+              <Text style={[styles.gsrmScore, { color: aColor, textAlign: "right" }]}>
+                {idx.awayVal != null ? idx.awayVal.toFixed(1) : "—"}
+              </Text>
+              <Text style={[styles.gsrmTag, { color: aColor, textAlign: "right" }]}>
+                {gsrmLabel(idx.awayVal)}
+              </Text>
+            </View>
+          </View>
+        );
+      })}
+    </View>
+  );
+}
+
 function TeamStatsCard({
   homeTeamName,
   awayTeamName,
@@ -1106,6 +1241,13 @@ function StadiumSimulationTab({
         awayTeamName={awayTeamName}
         homeForm={simulationMetrics?.home?.formSummary}
         awayForm={simulationMetrics?.away?.formSummary}
+      />
+
+      <GameIntelligenceCard
+        homeTeamName={homeTeamName}
+        awayTeamName={awayTeamName}
+        homeGsrm={simulationMetrics?.home?.gsrm}
+        awayGsrm={simulationMetrics?.away?.gsrm}
       />
 
       <TeamStatsCard
@@ -1726,5 +1868,86 @@ const styles = StyleSheet.create({
     color: Colors.dark.textSecondary,
     textAlign: "center",
     paddingVertical: 16,
+  },
+  gsrmRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    paddingVertical: 10,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: "rgba(255,255,255,0.06)",
+    gap: 8,
+  },
+  gsrmSide: {
+    width: 48,
+    alignItems: "center",
+    gap: 2,
+  },
+  gsrmSideRight: {
+    width: 48,
+    alignItems: "center",
+    gap: 2,
+  },
+  gsrmScore: {
+    fontSize: 15,
+    fontFamily: "Inter_700Bold",
+    textAlign: "center",
+  },
+  gsrmTag: {
+    fontSize: 9,
+    fontFamily: "Inter_600SemiBold",
+    textAlign: "center",
+    textTransform: "uppercase",
+    letterSpacing: 0.4,
+  },
+  gsrmCenter: {
+    flex: 1,
+    gap: 3,
+  },
+  gsrmLabel: {
+    fontSize: 11,
+    fontFamily: "Inter_600SemiBold",
+    color: Colors.dark.text,
+    textAlign: "center",
+  },
+  gsrmDesc: {
+    fontSize: 10,
+    fontFamily: "Inter_400Regular",
+    color: Colors.dark.textTertiary,
+    textAlign: "center",
+    lineHeight: 13,
+  },
+  gsrmBarRow: {
+    flexDirection: "row",
+    gap: 2,
+    height: 4,
+    marginTop: 4,
+  },
+  gsrmBarTrack: {
+    flex: 1,
+    height: 4,
+    backgroundColor: Colors.dark.surfaceSecondary,
+    borderRadius: 2,
+    overflow: "hidden",
+  },
+  gsrmBarFillHome: {
+    position: "absolute",
+    right: 0,
+    top: 0,
+    bottom: 0,
+    borderRadius: 2,
+  },
+  gsrmBarFillAway: {
+    position: "absolute",
+    left: 0,
+    top: 0,
+    bottom: 0,
+    borderRadius: 2,
+  },
+  gsrmMatchCount: {
+    fontSize: 9,
+    fontFamily: "Inter_400Regular",
+    color: Colors.dark.textTertiary,
+    textAlign: "center",
+    marginTop: 2,
   },
 });

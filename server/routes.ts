@@ -61,6 +61,139 @@ function calculateCustomXG(
   return Math.round(xg * 100) / 100;
 }
 
+type GoalState = { time: number; homeScore: number; awayScore: number };
+
+type GSRM = {
+  ecri: number | null;
+  eri: number | null;
+  tgbi: number | null;
+  frqi: number | null;
+  ecriMatches: number;
+  eriMatches: number;
+  tgbiMatches: number;
+  frqiMatches: number;
+};
+
+function parseGoalTimeline(incidentsData: any): GoalState[] {
+  const incidents: any[] = incidentsData?.incidents || [];
+  const goals: GoalState[] = [];
+  for (const inc of incidents) {
+    const type = (inc.incidentType || inc.type || "").toLowerCase();
+    if (type === "goal" || type === "penalty") {
+      const h = Number(inc.homeScore);
+      const a = Number(inc.awayScore);
+      const t = Number(inc.time) || 0;
+      if (Number.isFinite(h) && Number.isFinite(a) && h + a > 0) {
+        goals.push({ time: t, homeScore: h, awayScore: a });
+      }
+    }
+  }
+  return goals.sort((a, b) => a.time - b.time);
+}
+
+function computeGSRM(events: any[], teamId: number, incidentsByEventId: Map<number, any>): GSRM {
+  let ecriScore = 0, ecriCount = 0;
+  let eriScore = 0, eriCount = 0;
+  let tgbiScore = 0, tgbiCount = 0;
+  let frqiScore = 0, frqiCount = 0;
+
+  for (const event of events) {
+    const isHome = event.homeTeam?.id === teamId;
+    const isAway = event.awayTeam?.id === teamId;
+    if (!isHome && !isAway) continue;
+
+    const incData = incidentsByEventId.get(event.id);
+    if (!incData) continue;
+
+    const goals = parseGoalTimeline(incData);
+    if (goals.length === 0) continue;
+
+    const tS = (g: GoalState) => isHome ? g.homeScore : g.awayScore;
+    const oS = (g: GoalState) => isHome ? g.awayScore : g.homeScore;
+
+    const finalState = goals[goals.length - 1];
+    const finalTeam = tS(finalState);
+    const finalOpp = oS(finalState);
+
+    // ── ECRI: Opponent scores first before min 30 → does team respond? ────
+    if (goals.length > 0) {
+      const firstGoal = goals[0];
+      const oppScoredFirst = oS(firstGoal) > tS(firstGoal);
+      if (oppScoredFirst && firstGoal.time <= 30) {
+        ecriCount++;
+        const teamScoredAfter = goals.some(g => tS(g) > tS(firstGoal) && g.time > firstGoal.time);
+        if (teamScoredAfter) {
+          const firstTeamGoal = goals.find(g => tS(g) > tS(firstGoal) && g.time > firstGoal.time);
+          const responseMinutes = firstTeamGoal ? firstTeamGoal.time - firstGoal.time : 90;
+          const speedFactor = responseMinutes <= 20 ? 1.0 : responseMinutes <= 40 ? 0.7 : 0.4;
+          ecriScore += speedFactor;
+        }
+      }
+    }
+
+    // ── ERI: Team was leading, gets equalized → do they push for winner? ──
+    let prev: GoalState = { time: 0, homeScore: 0, awayScore: 0 };
+    for (let i = 0; i < goals.length; i++) {
+      const g = goals[i];
+      const oppScoredNow = oS(g) > oS(prev);
+      const teamWasLeadingBefore = tS(prev) > oS(prev);
+      const nowTied = tS(g) === oS(g);
+      if (oppScoredNow && teamWasLeadingBefore && nowTied) {
+        eriCount++;
+        const after = goals.slice(i + 1);
+        if (after.some(g2 => tS(g2) > oS(g2))) {
+          eriScore += 1.0;
+        } else if (!after.some(g2 => oS(g2) > tS(g2))) {
+          eriScore += 0.3;
+        }
+      }
+      prev = g;
+    }
+
+    // ── TGBI: Team leads by 2+ → attack more or sit back? ────────────────
+    const twoGoalMoment = goals.find(g => tS(g) - oS(g) >= 2);
+    if (twoGoalMoment) {
+      tgbiCount++;
+      const extraScored = finalTeam - tS(twoGoalMoment);
+      const extraConceded = finalOpp - oS(twoGoalMoment);
+      const netMargin = extraScored - extraConceded;
+      tgbiScore += Math.max(0, Math.min(10, 5 + netMargin * 1.5));
+    }
+
+    // ── FRQI: When trailing → how clinical/determined is the response? ───
+    const everBehind = goals.some(g => oS(g) > tS(g));
+    if (everBehind) {
+      frqiCount++;
+      let maxDeficit = 0;
+      let scoredWhileBehind = false;
+      let prevState: GoalState = { time: 0, homeScore: 0, awayScore: 0 };
+      for (const g of goals) {
+        const deficit = oS(g) - tS(g);
+        if (deficit > maxDeficit) maxDeficit = deficit;
+        if (tS(g) > tS(prevState) && oS(prevState) > tS(prevState)) scoredWhileBehind = true;
+        prevState = g;
+      }
+      let frqiMatch = 0;
+      if (scoredWhileBehind) frqiMatch += 0.5;
+      if (finalTeam >= finalOpp) frqiMatch += 0.5;
+      if (maxDeficit >= 2 && finalTeam >= finalOpp) frqiMatch += 0.3;
+      frqiScore += Math.min(1.3, frqiMatch);
+    }
+  }
+
+  const r1 = (v: number) => Math.round(v * 10) / 10;
+  return {
+    ecri: ecriCount > 0 ? r1((ecriScore / ecriCount) * 10) : null,
+    eri: eriCount > 0 ? r1((eriScore / eriCount) * 10) : null,
+    tgbi: tgbiCount > 0 ? r1(tgbiScore / tgbiCount) : null,
+    frqi: frqiCount > 0 ? r1((frqiScore / frqiCount / 1.3) * 10) : null,
+    ecriMatches: ecriCount,
+    eriMatches: eriCount,
+    tgbiMatches: tgbiCount,
+    frqiMatches: frqiCount,
+  };
+}
+
 function injectCustomXGIntoStatistics(data: any): any {
   if (!data?.statistics) return data;
   const statistics: any[] = data.statistics;
@@ -685,13 +818,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
         const last15EventIds = Array.from(new Set([...homeLast15, ...awayLast15].map((e: any) => e.id).filter(Boolean)));
 
-        const statsResults = await Promise.allSettled(
-          last15EventIds.map((id) => fetchSofaScore(`/event/${id}/statistics`)),
-        );
+        const [statsResults, incidentsResults] = await Promise.all([
+          Promise.allSettled(last15EventIds.map((id) => fetchSofaScore(`/event/${id}/statistics`))),
+          Promise.allSettled(last15EventIds.map((id) => fetchSofaScore(`/event/${id}/incidents`))),
+        ]);
         const statsByEventId = new Map<number, any>();
+        const incidentsByEventId = new Map<number, any>();
         last15EventIds.forEach((id, index) => {
-          const result = statsResults[index];
-          if (result.status === "fulfilled") statsByEventId.set(id, result.value);
+          const sRes = statsResults[index];
+          if (sRes.status === "fulfilled") statsByEventId.set(id, sRes.value);
+          const iRes = incidentsResults[index];
+          if (iRes.status === "fulfilled") incidentsByEventId.set(id, iRes.value);
         });
 
         function parseStatNum(value: any): number | null {
@@ -1531,13 +1668,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
         const awayHistory = collectTeamHistory(awayLast15, awayTeamId);
         const homeTeamMatchStats = computeTeamMatchStats(homeLast15, homeTeamId);
         const awayTeamMatchStats = computeTeamMatchStats(awayLast15, awayTeamId);
+        const homeGSRM = computeGSRM(homeLast15, homeTeamId, incidentsByEventId);
+        const awayGSRM = computeGSRM(awayLast15, awayTeamId, incidentsByEventId);
 
         const homeSide = enrichSide("home", homeHistory, homeLast15, homeTeamId);
         const awaySide = enrichSide("away", awayHistory, awayLast15, awayTeamId);
 
         res.json({
-          home: { ...homeSide, teamMatchStats: homeTeamMatchStats },
-          away: { ...awaySide, teamMatchStats: awayTeamMatchStats },
+          home: { ...homeSide, teamMatchStats: homeTeamMatchStats, gsrm: homeGSRM },
+          away: { ...awaySide, teamMatchStats: awayTeamMatchStats, gsrm: awayGSRM },
           confirmed: currentLineups?.confirmed ?? null,
           source: "last_15_role_based_lineup_statistics_with_likely_lineup_fallback",
         });
