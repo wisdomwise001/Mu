@@ -8,8 +8,10 @@ import {
   Platform,
   TouchableOpacity,
 } from "react-native";
+import { TextInput } from "react-native";
 import { useQuery } from "@tanstack/react-query";
 import Colors from "@/constants/colors";
+import { getApiUrl } from "@/lib/query-client";
 
 interface PlayerData {
   player: { shortName?: string; id?: number; name?: string };
@@ -2250,6 +2252,13 @@ function StadiumSimulationTab({
         awayStats={simulationMetrics?.away?.teamMatchStats}
       />
 
+      <SimChatCard
+        eventId={eventId}
+        homeTeamName={homeTeamName}
+        awayTeamName={awayTeamName}
+        simulationMetrics={simulationMetrics}
+      />
+
       <SimulationPanel
         homeTeamName={homeTeamName}
         awayTeamName={awayTeamName}
@@ -2267,6 +2276,198 @@ function StadiumSimulationTab({
 
       <View style={{ height: 32 }} />
     </ScrollView>
+  );
+}
+
+// ─── SimChatCard — AI chat grounded in the per-fixture simulation context ───
+
+type ChatMessage = { role: "user" | "assistant"; content: string };
+
+function buildSimChatContext(metrics: SimulationMetricsResponse | undefined) {
+  if (!metrics) return null;
+  const slim = (team: any) => team && {
+    matchesAnalyzed: team.matchesAnalyzed,
+    teamStrength: team.teamStrength,
+    phaseStrengths: team.phaseStrengths,
+    formSummary: team.formSummary,
+    gsrm: team.gsrm,
+    ssbi: team.ssbi,
+    scoringPatterns: team.scoringPatterns,
+    causalAnalysis: team.causalAnalysis,
+    teamMatchStats: team.teamMatchStats,
+  };
+  return {
+    home: slim(metrics.home),
+    away: slim(metrics.away),
+    simulationInsights: metrics.simulationInsights,
+  };
+}
+
+function MessageBubble({ msg }: { msg: ChatMessage }) {
+  const isUser = msg.role === "user";
+  return (
+    <View style={[styles.chatBubble, isUser ? styles.chatBubbleUser : styles.chatBubbleAi]}>
+      {!isUser && <Text style={styles.chatRoleLabel}>AI Analyst</Text>}
+      <Text style={[styles.chatBubbleText, isUser && styles.chatBubbleTextUser]}>{msg.content}</Text>
+    </View>
+  );
+}
+
+function SimChatCard({
+  eventId,
+  homeTeamName,
+  awayTeamName,
+  simulationMetrics,
+}: {
+  eventId: string;
+  homeTeamName: string;
+  awayTeamName: string;
+  simulationMetrics: SimulationMetricsResponse | undefined;
+}) {
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [input, setInput] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const hasContext = !!simulationMetrics?.home && !!simulationMetrics?.away;
+
+  const sendMessage = useCallback(async (userText: string) => {
+    if (!hasContext || loading) return;
+    const trimmed = userText.trim();
+    if (!trimmed) return;
+
+    const newMsgs: ChatMessage[] = [...messages, { role: "user", content: trimmed }];
+    setMessages(newMsgs);
+    setInput("");
+    setLoading(true);
+    setError(null);
+
+    try {
+      const simContext = buildSimChatContext(simulationMetrics);
+      const baseUrl = getApiUrl();
+      const url = new URL(`/api/event/${eventId}/sim-chat`, baseUrl);
+      const res = await fetch(url.toString(), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          messages: newMsgs,
+          simContext,
+          homeTeamName,
+          awayTeamName,
+        }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || `Request failed (${res.status})`);
+      }
+      const data = await res.json();
+      const assistantMsg = data?.message as ChatMessage | undefined;
+      if (assistantMsg?.content) {
+        setMessages([...newMsgs, assistantMsg]);
+      } else {
+        throw new Error("Empty AI response");
+      }
+    } catch (e: any) {
+      setError(e?.message || "Failed to get AI response");
+    } finally {
+      setLoading(false);
+    }
+  }, [messages, simulationMetrics, hasContext, loading, eventId, homeTeamName, awayTeamName]);
+
+  const generateInsight = useCallback(() => {
+    sendMessage(
+      `Give me your full match insight for ${homeTeamName} vs ${awayTeamName}. ` +
+      `Reason step by step through each team's causal analysis (repeatable vs variance), ` +
+      `their scoring/conceding patterns, behavioural traits and how those collide. ` +
+      `Then give me likely full-time scoreline, match result lean, first-half scoreline, ` +
+      `second-half scoreline, BTTS lean, and total goals (Over/Under 2.5). Be specific and grounded in the data.`
+    );
+  }, [sendMessage, homeTeamName, awayTeamName]);
+
+  const clearChat = useCallback(() => {
+    setMessages([]);
+    setError(null);
+  }, []);
+
+  return (
+    <View style={styles.chatCard}>
+      <View style={styles.chatHeader}>
+        <Text style={styles.chatTitle}>AI Match Insight Chat</Text>
+        <Text style={styles.chatSubtitle}>
+          Reasons step by step through both teams' causal analysis, patterns, hidden truths & game intelligence to project this fixture.
+        </Text>
+      </View>
+
+      {messages.length === 0 ? (
+        <View style={styles.chatEmptyState}>
+          <Text style={styles.chatEmptyText}>
+            Tap below to generate a full step-by-step insight, or ask any question about this fixture.
+          </Text>
+        </View>
+      ) : (
+        <View style={styles.chatMessages}>
+          {messages.map((m, i) => (
+            <MessageBubble key={i} msg={m} />
+          ))}
+          {loading && (
+            <View style={[styles.chatBubble, styles.chatBubbleAi]}>
+              <Text style={styles.chatRoleLabel}>AI Analyst</Text>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                <ActivityIndicator size="small" color={Colors.dark.accent} />
+                <Text style={styles.chatBubbleText}>Reasoning through the data…</Text>
+              </View>
+            </View>
+          )}
+        </View>
+      )}
+
+      {error && <Text style={styles.chatError}>{error}</Text>}
+
+      <View style={styles.chatActionsRow}>
+        <TouchableOpacity
+          style={[styles.chatPrimaryBtn, (!hasContext || loading) && styles.chatBtnDisabled]}
+          onPress={generateInsight}
+          disabled={!hasContext || loading}
+          activeOpacity={0.85}
+        >
+          <Text style={styles.chatPrimaryBtnText}>
+            {messages.length === 0 ? "Generate full match insight" : "Re-generate full insight"}
+          </Text>
+        </TouchableOpacity>
+        {messages.length > 0 && (
+          <TouchableOpacity style={styles.chatClearBtn} onPress={clearChat} disabled={loading}>
+            <Text style={styles.chatClearBtnText}>Clear</Text>
+          </TouchableOpacity>
+        )}
+      </View>
+
+      <View style={styles.chatInputRow}>
+        <TextInput
+          style={styles.chatInput}
+          placeholder="Ask a follow-up question…"
+          placeholderTextColor="#6b7280"
+          value={input}
+          onChangeText={setInput}
+          editable={!loading && hasContext}
+          multiline
+          onSubmitEditing={() => sendMessage(input)}
+          returnKeyType="send"
+          blurOnSubmit
+        />
+        <TouchableOpacity
+          style={[styles.chatSendBtn, (!hasContext || loading || !input.trim()) && styles.chatBtnDisabled]}
+          onPress={() => sendMessage(input)}
+          disabled={!hasContext || loading || !input.trim()}
+          activeOpacity={0.85}
+        >
+          <Text style={styles.chatSendBtnText}>Send</Text>
+        </TouchableOpacity>
+      </View>
+
+      {!hasContext && (
+        <Text style={styles.chatHint}>Loading simulation context…</Text>
+      )}
+    </View>
   );
 }
 
@@ -3577,5 +3778,164 @@ const styles = StyleSheet.create({
     fontFamily: "Inter_400Regular",
     color: Colors.dark.textTertiary,
     lineHeight: 14,
+  },
+
+  // ─── SimChatCard ─────────────────────────────────────────────────
+  chatCard: {
+    backgroundColor: Colors.dark.cardBackground,
+    borderRadius: 12,
+    padding: 14,
+    marginHorizontal: 12,
+    marginTop: 12,
+    borderWidth: 1,
+    borderColor: Colors.dark.border,
+  },
+  chatHeader: {
+    marginBottom: 10,
+  },
+  chatTitle: {
+    fontSize: 14,
+    fontFamily: "Inter_700Bold",
+    color: Colors.dark.text,
+    marginBottom: 4,
+  },
+  chatSubtitle: {
+    fontSize: 11,
+    fontFamily: "Inter_400Regular",
+    color: Colors.dark.textTertiary,
+    lineHeight: 15,
+  },
+  chatEmptyState: {
+    paddingVertical: 16,
+    paddingHorizontal: 12,
+    backgroundColor: "rgba(255,255,255,0.02)",
+    borderRadius: 8,
+    marginBottom: 10,
+  },
+  chatEmptyText: {
+    fontSize: 12,
+    color: Colors.dark.textSecondary,
+    fontFamily: "Inter_400Regular",
+    lineHeight: 16,
+    textAlign: "center",
+  },
+  chatMessages: {
+    marginBottom: 10,
+    gap: 8,
+  },
+  chatBubble: {
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 10,
+    maxWidth: "100%",
+  },
+  chatBubbleAi: {
+    backgroundColor: "rgba(99,102,241,0.10)",
+    borderWidth: 1,
+    borderColor: "rgba(99,102,241,0.25)",
+    alignSelf: "flex-start",
+  },
+  chatBubbleUser: {
+    backgroundColor: Colors.dark.accent,
+    alignSelf: "flex-end",
+  },
+  chatRoleLabel: {
+    fontSize: 10,
+    fontFamily: "Inter_600SemiBold",
+    color: "#a5b4fc",
+    marginBottom: 4,
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+  },
+  chatBubbleText: {
+    fontSize: 12.5,
+    fontFamily: "Inter_400Regular",
+    color: Colors.dark.text,
+    lineHeight: 18,
+  },
+  chatBubbleTextUser: {
+    color: "#0b0f1a",
+    fontFamily: "Inter_500Medium",
+  },
+  chatError: {
+    fontSize: 11,
+    color: "#ef4444",
+    fontFamily: "Inter_500Medium",
+    marginBottom: 8,
+    paddingHorizontal: 4,
+  },
+  chatActionsRow: {
+    flexDirection: "row",
+    gap: 8,
+    marginBottom: 10,
+  },
+  chatPrimaryBtn: {
+    flex: 1,
+    backgroundColor: Colors.dark.accent,
+    paddingVertical: 11,
+    borderRadius: 8,
+    alignItems: "center",
+  },
+  chatPrimaryBtnText: {
+    fontSize: 12.5,
+    fontFamily: "Inter_600SemiBold",
+    color: "#0b0f1a",
+  },
+  chatClearBtn: {
+    paddingHorizontal: 14,
+    paddingVertical: 11,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: Colors.dark.border,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  chatClearBtnText: {
+    fontSize: 12,
+    fontFamily: "Inter_500Medium",
+    color: Colors.dark.textSecondary,
+  },
+  chatInputRow: {
+    flexDirection: "row",
+    alignItems: "flex-end",
+    gap: 8,
+  },
+  chatInput: {
+    flex: 1,
+    minHeight: 40,
+    maxHeight: 100,
+    paddingHorizontal: 12,
+    paddingTop: Platform.OS === "ios" ? 10 : 8,
+    paddingBottom: Platform.OS === "ios" ? 10 : 8,
+    backgroundColor: "rgba(255,255,255,0.04)",
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: Colors.dark.border,
+    color: Colors.dark.text,
+    fontSize: 12.5,
+    fontFamily: "Inter_400Regular",
+  },
+  chatSendBtn: {
+    paddingHorizontal: 16,
+    paddingVertical: 11,
+    backgroundColor: Colors.dark.accent,
+    borderRadius: 8,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  chatSendBtnText: {
+    fontSize: 12.5,
+    fontFamily: "Inter_600SemiBold",
+    color: "#0b0f1a",
+  },
+  chatBtnDisabled: {
+    opacity: 0.4,
+  },
+  chatHint: {
+    fontSize: 10.5,
+    fontFamily: "Inter_400Regular",
+    color: Colors.dark.textTertiary,
+    marginTop: 8,
+    textAlign: "center",
   },
 });

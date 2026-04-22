@@ -4056,6 +4056,92 @@ Output ONLY a valid JSON object. No markdown, no code blocks, no explanation out
     }
   });
 
+  // ─── Simulation AI Chat — ask questions grounded in the per-fixture stats ─
+  app.post("/api/event/:eventId/sim-chat", async (req: Request, res: Response) => {
+    try {
+      const { messages, simContext, homeTeamName, awayTeamName } = req.body as {
+        messages: { role: "user" | "assistant"; content: string }[];
+        simContext: any;
+        homeTeamName: string;
+        awayTeamName: string;
+      };
+
+      if (!Array.isArray(messages) || messages.length === 0) {
+        return res.status(400).json({ error: "messages array required" });
+      }
+      if (!simContext) {
+        return res.status(400).json({ error: "simContext required" });
+      }
+
+      const contextJson = JSON.stringify(simContext, null, 2);
+
+      const systemPrompt =
+`You are an elite football match analyst embedded inside the Simulation tab of a fixture analysis app.
+You have FULL access to the per-team statistical and behavioural profile of both teams below — last-15
+role strengths, recent-form strengths, scoring & conceding patterns, GSRM behavioural patterns, SSBI
+state-breakability, scoring patterns, **causal analysis** (why each result happened, repeatable vs
+variance), hidden truths, matchup cross-references, and team match stats.
+
+The fixture is: ${homeTeamName} (home) vs ${awayTeamName} (away).
+
+────────────────────────── DATA CONTEXT ──────────────────────────
+${contextJson}
+──────────────────────────────────────────────────────────────────
+
+Your job:
+1. NEVER use surface averages alone. Always reason from the underlying CAUSE of each team's results.
+2. Walk through your reasoning STEP BY STEP — factor by factor, effect by effect:
+   • What kind of results has each team produced and WHY (defensive structure, tactical deadlock,
+     finishing inefficiency, opponent class, variance, late drop-off, etc.)?
+   • Which of those causes are REPEATABLE and which are VARIANCE (luck) — discount variance.
+   • How does each team behave across game states (0-0, 1-0 up, 1-1, trailing, 2 ahead, 2 behind)?
+   • How do their patterns COLLIDE — e.g. front-runner choker meets a comeback specialist, fast
+     starters meet slow-to-wake defenders, leaky defence vs clinical attack, etc.
+   • Opponent quality — a team destroying weak opposition may struggle vs relentless ones, and
+     vice-versa. Adjust expectations accordingly.
+   • Behavioural / psychological signals from the hidden truths (complacency, stage fright,
+     bounce-back, post-loss reactions, travel mindset).
+3. Produce a clear MATCH INSIGHT with the following sections:
+   • Step-by-step reasoning for each team
+   • Pattern collision (how the two profiles meet)
+   • **Likely full-time scoreline** (give 2-3 most likely scorelines with reasoning)
+   • **Match result lean** (Home / Draw / Away with confidence and why)
+   • **First-half scoreline lean**
+   • **Second-half scoreline lean**
+   • **BTTS lean** (Yes / No with reasoning grounded in repeatable causes)
+   • **Total goals lean** (Over/Under 2.5 with reasoning)
+   • **Risk factors** (what would invalidate the read — e.g. variance regression, key injuries,
+     game-state behaviour twist)
+4. Be specific. Quote numbers, percentages, repeatability tags, and named patterns from the context.
+   Do not invent stats — only use what is in the context.
+5. If the user asks a follow-up question, answer it grounded in the context, citing the same
+   underlying causes. Stay in plain analyst language — no jargon dumps.
+
+Format with clear markdown headings (### for sections). Keep it punchy but thorough.`;
+
+      const response = await openai.chat.completions.create({
+        model: "o4-mini",
+        messages: [
+          { role: "system", content: systemPrompt },
+          ...messages,
+        ],
+        max_completion_tokens: 4500,
+      });
+
+      const assistantText = response.choices[0]?.message?.content || "";
+      res.json({ message: { role: "assistant", content: assistantText } });
+    } catch (error: any) {
+      console.error("sim-chat error:", error?.message);
+      const msg = String(error?.message || "");
+      const isAuth = error?.status === 401 || /api key|authorization/i.test(msg);
+      res.status(isAuth ? 503 : 500).json({
+        error: isAuth
+          ? "AI chat is not available right now. Please check the AI key and try again."
+          : "AI chat could not generate a response right now. Please try again.",
+      });
+    }
+  });
+
   // ─── xG Engine: status ────────────────────────────────────────────────────
   app.get("/api/engine/status", (_req: Request, res: Response) => {
     try {
