@@ -4011,9 +4011,9 @@ Output ONLY a valid JSON object. No markdown, no code blocks, no explanation out
 }`;
 
       const response = await openai.chat.completions.create({
-        model: "o4-mini",
+        model: "gpt-5.4",
         messages: [{ role: "user", content: prompt }],
-        max_completion_tokens: 4000,
+        max_completion_tokens: 6000,
       });
 
       const rawContent = response.choices[0]?.message?.content || "{}";
@@ -4120,12 +4120,12 @@ Your job:
 Format with clear markdown headings (### for sections). Keep it punchy but thorough.`;
 
       const response = await openai.chat.completions.create({
-        model: "o4-mini",
+        model: "gpt-5.4",
         messages: [
           { role: "system", content: systemPrompt },
           ...messages,
         ],
-        max_completion_tokens: 4500,
+        max_completion_tokens: 6000,
       });
 
       const assistantText = response.choices[0]?.message?.content || "";
