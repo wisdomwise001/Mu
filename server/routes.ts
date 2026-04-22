@@ -93,6 +93,249 @@ type GSRM = {
   frqiMatches: number;
 };
 
+type ScoringBucket = {
+  label: string;
+  scored: number;
+  conceded: number;
+  scoredPct: number;
+  concededPct: number;
+};
+
+type ScoringPatterns = {
+  matchesAnalyzed: number;
+  matchesWithIncidents: number;
+  totalScored: number;
+  totalConceded: number;
+  avgScored: number | null;
+  avgConceded: number | null;
+  buckets: ScoringBucket[];
+  peakScoringWindow: string | null;
+  peakScoringPct: number | null;
+  vulnerabilityWindow: string | null;
+  vulnerabilityPct: number | null;
+  avgFirstGoalMin: number | null;
+  avgFirstConcededMin: number | null;
+  scoredFirstRate: number | null;
+  concededFirstRate: number | null;
+  winWhenScoredFirst: number | null;
+  winWhenConcededFirst: number | null;
+  cleanSheetRate: number | null;
+  failedToScoreRate: number | null;
+  bttsRate: number | null;
+  over25Rate: number | null;
+  comebackRate: number | null;
+  blownLeadRate: number | null;
+  xgPerMatch: number | null;
+  xgDelta: number | null;
+  finishingTag: "Deadly" | "Clinical" | "Reliable" | "Wasteful" | "Flop" | null;
+  styleTags: string[];
+};
+
+const PATTERN_BUCKETS: { label: string; from: number; to: number }[] = [
+  { label: "0–15′",  from: 0,  to: 15 },
+  { label: "16–30′", from: 15, to: 30 },
+  { label: "31–45′", from: 30, to: 46 },
+  { label: "46–60′", from: 45, to: 60 },
+  { label: "61–75′", from: 60, to: 75 },
+  { label: "76–90′", from: 75, to: 200 },
+];
+
+function bucketFor(time: number): number {
+  for (let i = 0; i < PATTERN_BUCKETS.length; i++) {
+    const b = PATTERN_BUCKETS[i];
+    if (time > b.from && time <= b.to) return i;
+  }
+  return Math.max(0, PATTERN_BUCKETS.length - 1);
+}
+
+function computeScoringPatterns(
+  events: any[],
+  teamId: number,
+  incidentsByEventId: Map<number, any>,
+  avgXgScored: number | null,
+): ScoringPatterns {
+  const buckets = PATTERN_BUCKETS.map((b) => ({
+    label: b.label, scored: 0, conceded: 0, scoredPct: 0, concededPct: 0,
+  }));
+
+  let totalScored = 0;
+  let totalConceded = 0;
+  let firstGoalSum = 0, firstGoalCount = 0;
+  let firstConcSum = 0, firstConcCount = 0;
+  let scoredFirst = 0, concededFirst = 0;
+  let winsScoredFirst = 0, winsConcededFirst = 0;
+  let cleanSheets = 0, failedToScore = 0, btts = 0, over25 = 0;
+  let comebacks = 0, blownLeads = 0;
+  let matchesWithIncidents = 0;
+  let finalGoalsFor = 0, finalGoalsAgainst = 0, finalCount = 0;
+
+  for (const event of events) {
+    const isHome = event.homeTeam?.id === teamId;
+    const isAway = event.awayTeam?.id === teamId;
+    if (!isHome && !isAway) continue;
+
+    const incData = incidentsByEventId.get(event.id);
+    const goals = incData ? parseGoalTimeline(incData) : [];
+
+    const finalState = goals.length > 0
+      ? goals[goals.length - 1]
+      : {
+          time: 0,
+          homeScore: Number(event.homeScore?.current ?? event.homeScore?.normaltime ?? 0) || 0,
+          awayScore: Number(event.awayScore?.current ?? event.awayScore?.normaltime ?? 0) || 0,
+        };
+    const teamFinal = isHome ? finalState.homeScore : finalState.awayScore;
+    const oppFinal  = isHome ? finalState.awayScore : finalState.homeScore;
+    finalGoalsFor += teamFinal;
+    finalGoalsAgainst += oppFinal;
+    finalCount++;
+
+    if (teamFinal === 0) failedToScore++;
+    if (oppFinal === 0) cleanSheets++;
+    if (teamFinal > 0 && oppFinal > 0) btts++;
+    if (teamFinal + oppFinal >= 3) over25++;
+
+    if (goals.length === 0) continue;
+    matchesWithIncidents++;
+
+    const tS = (g: GoalState) => isHome ? g.homeScore : g.awayScore;
+    const oS = (g: GoalState) => isHome ? g.awayScore : g.homeScore;
+
+    let prev: GoalState = { time: 0, homeScore: 0, awayScore: 0 };
+    let firstTeamGoalMin: number | null = null;
+    let firstOppGoalMin: number | null = null;
+    let everBehind = false;
+    let everLed = false;
+
+    for (const g of goals) {
+      const teamScoredNow = tS(g) > tS(prev);
+      const oppScoredNow  = oS(g) > oS(prev);
+      const idx = bucketFor(g.time);
+      if (teamScoredNow) {
+        buckets[idx].scored++;
+        totalScored++;
+        if (firstTeamGoalMin === null) firstTeamGoalMin = g.time;
+      }
+      if (oppScoredNow) {
+        buckets[idx].conceded++;
+        totalConceded++;
+        if (firstOppGoalMin === null) firstOppGoalMin = g.time;
+      }
+      if (oS(g) > tS(g)) everBehind = true;
+      if (tS(g) > oS(g)) everLed = true;
+      prev = g;
+    }
+
+    if (firstTeamGoalMin !== null && (firstOppGoalMin === null || firstTeamGoalMin < firstOppGoalMin)) {
+      scoredFirst++;
+      firstGoalSum += firstTeamGoalMin;
+      firstGoalCount++;
+      if (teamFinal > oppFinal) winsScoredFirst++;
+      if (oppFinal > teamFinal || (everLed && teamFinal <= oppFinal)) blownLeads++;
+    }
+    if (firstOppGoalMin !== null && (firstTeamGoalMin === null || firstOppGoalMin < firstTeamGoalMin)) {
+      concededFirst++;
+      firstConcSum += firstOppGoalMin;
+      firstConcCount++;
+      if (teamFinal > oppFinal) winsConcededFirst++;
+      if (everBehind && teamFinal >= oppFinal) comebacks++;
+    }
+  }
+
+  buckets.forEach((b) => {
+    b.scoredPct   = totalScored   > 0 ? Math.round((b.scored   / totalScored)   * 1000) / 10 : 0;
+    b.concededPct = totalConceded > 0 ? Math.round((b.conceded / totalConceded) * 1000) / 10 : 0;
+  });
+
+  const matchesAnalyzed = events.length;
+  const r1 = (v: number) => Math.round(v * 10) / 10;
+  const pct = (n: number, d: number) => d > 0 ? Math.round((n / d) * 1000) / 10 : null;
+
+  let peakIdx = -1, peakVal = -1;
+  let vulnIdx = -1, vulnVal = -1;
+  buckets.forEach((b, i) => {
+    if (b.scored   > peakVal) { peakVal = b.scored;   peakIdx = i; }
+    if (b.conceded > vulnVal) { vulnVal = b.conceded; vulnIdx = i; }
+  });
+
+  const avgScored   = finalCount > 0 ? r1(finalGoalsFor / finalCount)     : null;
+  const avgConceded = finalCount > 0 ? r1(finalGoalsAgainst / finalCount) : null;
+  const xgDelta = (avgScored != null && avgXgScored != null) ? r1(avgScored - avgXgScored) : null;
+
+  let finishingTag: ScoringPatterns["finishingTag"] = null;
+  if (xgDelta != null) {
+    if (xgDelta >= 0.45) finishingTag = "Deadly";
+    else if (xgDelta >= 0.2) finishingTag = "Clinical";
+    else if (xgDelta >= -0.2) finishingTag = "Reliable";
+    else if (xgDelta >= -0.45) finishingTag = "Wasteful";
+    else finishingTag = "Flop";
+  }
+
+  const styleTags: string[] = [];
+  const peakLabel = peakIdx >= 0 ? PATTERN_BUCKETS[peakIdx].label : null;
+  const vulnLabel = vulnIdx >= 0 ? PATTERN_BUCKETS[vulnIdx].label : null;
+
+  if (peakLabel === "0–15′" && totalScored >= 5) styleTags.push(`Lightning starters — wizards at ${peakLabel} explosions`);
+  if (peakLabel === "76–90′" && totalScored >= 5) styleTags.push(`Late finishers — most damage in ${peakLabel}`);
+  if ((peakLabel === "31–45′" || peakLabel === "46–60′") && totalScored >= 5) styleTags.push(`Slow burners — peak window ${peakLabel}`);
+  if (vulnLabel === "0–15′" && totalConceded >= 4) styleTags.push(`Slow to wake — leak goals in ${vulnLabel}`);
+  if (vulnLabel === "76–90′" && totalConceded >= 4) styleTags.push(`Fade late — concede most in ${vulnLabel}`);
+
+  const sFirst = pct(scoredFirst, matchesAnalyzed);
+  const cFirst = pct(concededFirst, matchesAnalyzed);
+  if (sFirst != null && sFirst >= 60) styleTags.push(`Score first ${sFirst}% of matches — front-foot starters`);
+  if (cFirst != null && cFirst >= 55) styleTags.push(`Concede first ${cFirst}% — chasing games often`);
+
+  if (avgScored != null && avgScored >= 2.0) styleTags.push(`Heavy scorers · ${avgScored} goals/match`);
+  if (avgConceded != null && avgConceded >= 1.7) styleTags.push(`Leaky defence · ${avgConceded} conceded/match`);
+  if (avgScored != null && avgScored < 1.0) styleTags.push(`Goal-shy · only ${avgScored} scored/match`);
+  if (avgConceded != null && avgConceded < 0.8) styleTags.push(`Stingy · only ${avgConceded} conceded/match`);
+
+  if (finishingTag === "Deadly")  styleTags.push(`Deadly finishers — beating xG by +${xgDelta}/match`);
+  if (finishingTag === "Clinical") styleTags.push(`Clinical edge — over xG by +${xgDelta}/match`);
+  if (finishingTag === "Wasteful") styleTags.push(`Wasteful — under xG by ${xgDelta}/match`);
+  if (finishingTag === "Flop")     styleTags.push(`Flop in front of goal — under xG by ${xgDelta}/match`);
+
+  const csRate  = pct(cleanSheets, matchesAnalyzed);
+  const f2sRate = pct(failedToScore, matchesAnalyzed);
+  const bttsRt  = pct(btts, matchesAnalyzed);
+  const o25Rt   = pct(over25, matchesAnalyzed);
+  if (csRate  != null && csRate  >= 35) styleTags.push(`${csRate}% clean-sheet rate`);
+  if (f2sRate != null && f2sRate >= 35) styleTags.push(`Blank ${f2sRate}% of matches`);
+  if (bttsRt  != null && bttsRt  >= 65) styleTags.push(`BTTS in ${bttsRt}% — open games`);
+  if (o25Rt   != null && o25Rt   >= 65) styleTags.push(`Over 2.5 in ${o25Rt}% — high-scoring style`);
+
+  return {
+    matchesAnalyzed,
+    matchesWithIncidents,
+    totalScored,
+    totalConceded,
+    avgScored,
+    avgConceded,
+    buckets,
+    peakScoringWindow: peakVal > 0 ? peakLabel : null,
+    peakScoringPct: peakVal > 0 && totalScored > 0 ? Math.round((peakVal / totalScored) * 1000) / 10 : null,
+    vulnerabilityWindow: vulnVal > 0 ? vulnLabel : null,
+    vulnerabilityPct: vulnVal > 0 && totalConceded > 0 ? Math.round((vulnVal / totalConceded) * 1000) / 10 : null,
+    avgFirstGoalMin:      firstGoalCount > 0 ? r1(firstGoalSum / firstGoalCount) : null,
+    avgFirstConcededMin:  firstConcCount > 0 ? r1(firstConcSum / firstConcCount) : null,
+    scoredFirstRate:    sFirst,
+    concededFirstRate:  cFirst,
+    winWhenScoredFirst:    pct(winsScoredFirst, scoredFirst),
+    winWhenConcededFirst:  pct(winsConcededFirst, concededFirst),
+    cleanSheetRate:    csRate,
+    failedToScoreRate: f2sRate,
+    bttsRate: bttsRt,
+    over25Rate: o25Rt,
+    comebackRate:  pct(comebacks, concededFirst),
+    blownLeadRate: pct(blownLeads, scoredFirst),
+    xgPerMatch: avgXgScored != null ? r1(avgXgScored) : null,
+    xgDelta,
+    finishingTag,
+    styleTags,
+  };
+}
+
 function parseGoalTimeline(incidentsData: any): GoalState[] {
   const incidents: any[] = incidentsData?.incidents || [];
   const goals: GoalState[] = [];
@@ -1864,12 +2107,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
         const homeSSBI = computeSSBI(homeLast15, homeTeamId, incidentsByEventId, homeMissingIds);
         const awaySSBI = computeSSBI(awayLast15, awayTeamId, incidentsByEventId, awayMissingIds);
 
+        const homePatterns = computeScoringPatterns(homeLast15, homeTeamId, incidentsByEventId, homeTeamMatchStats?.all?.avgXg ?? null);
+        const awayPatterns = computeScoringPatterns(awayLast15, awayTeamId, incidentsByEventId, awayTeamMatchStats?.all?.avgXg ?? null);
+
         const homeSide = enrichSide("home", homeHistory, homeLast15, homeTeamId);
         const awaySide = enrichSide("away", awayHistory, awayLast15, awayTeamId);
 
         res.json({
-          home: { ...homeSide, teamMatchStats: homeTeamMatchStats, gsrm: homeGSRM, ssbi: homeSSBI },
-          away: { ...awaySide, teamMatchStats: awayTeamMatchStats, gsrm: awayGSRM, ssbi: awaySSBI },
+          home: { ...homeSide, teamMatchStats: homeTeamMatchStats, gsrm: homeGSRM, ssbi: homeSSBI, scoringPatterns: homePatterns },
+          away: { ...awaySide, teamMatchStats: awayTeamMatchStats, gsrm: awayGSRM, ssbi: awaySSBI, scoringPatterns: awayPatterns },
           confirmed: currentLineups?.confirmed ?? null,
           source: "last_15_role_based_lineup_statistics_with_likely_lineup_fallback",
         });

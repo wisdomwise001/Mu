@@ -114,6 +114,44 @@ interface SSBI {
   keyBreakers: SSBIBreaker[];
 }
 
+interface ScoringBucket {
+  label: string;
+  scored: number;
+  conceded: number;
+  scoredPct: number;
+  concededPct: number;
+}
+
+interface ScoringPatterns {
+  matchesAnalyzed: number;
+  matchesWithIncidents: number;
+  totalScored: number;
+  totalConceded: number;
+  avgScored: number | null;
+  avgConceded: number | null;
+  buckets: ScoringBucket[];
+  peakScoringWindow: string | null;
+  peakScoringPct: number | null;
+  vulnerabilityWindow: string | null;
+  vulnerabilityPct: number | null;
+  avgFirstGoalMin: number | null;
+  avgFirstConcededMin: number | null;
+  scoredFirstRate: number | null;
+  concededFirstRate: number | null;
+  winWhenScoredFirst: number | null;
+  winWhenConcededFirst: number | null;
+  cleanSheetRate: number | null;
+  failedToScoreRate: number | null;
+  bttsRate: number | null;
+  over25Rate: number | null;
+  comebackRate: number | null;
+  blownLeadRate: number | null;
+  xgPerMatch: number | null;
+  xgDelta: number | null;
+  finishingTag: "Deadly" | "Clinical" | "Reliable" | "Wasteful" | "Flop" | null;
+  styleTags: string[];
+}
+
 interface PeriodStats {
   avgGoalsScored: number | null;
   avgGoalsConceded: number | null;
@@ -174,6 +212,7 @@ interface SimulationMetricsResponse {
     teamMatchStats?: TeamMatchStats;
     gsrm?: GSRM | null;
     ssbi?: SSBI | null;
+    scoringPatterns?: ScoringPatterns | null;
   };
   away?: {
     formation?: string | null;
@@ -199,6 +238,7 @@ interface SimulationMetricsResponse {
     teamMatchStats?: TeamMatchStats;
     gsrm?: GSRM | null;
     ssbi?: SSBI | null;
+    scoringPatterns?: ScoringPatterns | null;
   };
 }
 
@@ -1161,6 +1201,255 @@ function ScoreStateBreakCard({
   );
 }
 
+function finishingTagColor(tag: ScoringPatterns["finishingTag"]): string {
+  switch (tag) {
+    case "Deadly":   return "#22c55e";
+    case "Clinical": return "#4ade80";
+    case "Reliable": return "#eab308";
+    case "Wasteful": return "#f97316";
+    case "Flop":     return "#ef4444";
+    default:         return Colors.dark.textSecondary;
+  }
+}
+
+function PatternHeatRow({
+  bucket,
+  side,
+  maxScored,
+  maxConceded,
+}: {
+  bucket: ScoringBucket;
+  side: "home" | "away";
+  maxScored: number;
+  maxConceded: number;
+}) {
+  const sPct = maxScored   > 0 ? Math.max(4, (bucket.scored   / maxScored)   * 100) : 4;
+  const cPct = maxConceded > 0 ? Math.max(4, (bucket.conceded / maxConceded) * 100) : 4;
+  const sideColor = side === "home" ? Colors.dark.homeKit : Colors.dark.awayKit;
+  return (
+    <View style={styles.patternRow}>
+      <Text style={styles.patternBucketLabel}>{bucket.label}</Text>
+      <View style={styles.patternBars}>
+        <View style={styles.patternBarBlock}>
+          <View style={styles.patternBarTrack}>
+            <View style={[styles.patternBarFill, { width: `${sPct}%`, backgroundColor: "#22c55e" }]} />
+          </View>
+          <Text style={styles.patternBarText}>
+            {bucket.scored} <Text style={styles.patternBarPct}>({bucket.scoredPct.toFixed(0)}%)</Text>
+          </Text>
+        </View>
+        <View style={styles.patternBarBlock}>
+          <View style={styles.patternBarTrack}>
+            <View style={[styles.patternBarFill, { width: `${cPct}%`, backgroundColor: "#ef4444" }]} />
+          </View>
+          <Text style={styles.patternBarText}>
+            {bucket.conceded} <Text style={styles.patternBarPct}>({bucket.concededPct.toFixed(0)}%)</Text>
+          </Text>
+        </View>
+      </View>
+      <View style={[styles.patternSideDot, { backgroundColor: sideColor }]} />
+    </View>
+  );
+}
+
+function PatternSideBlock({
+  teamName,
+  side,
+  patterns,
+}: {
+  teamName: string;
+  side: "home" | "away";
+  patterns?: ScoringPatterns | null;
+}) {
+  if (!patterns) return null;
+  if (patterns.matchesWithIncidents === 0 && patterns.matchesAnalyzed === 0) return null;
+
+  const sideColor = side === "home" ? Colors.dark.homeKit : Colors.dark.awayKit;
+  const maxScored   = patterns.buckets.reduce((m, b) => Math.max(m, b.scored),   0);
+  const maxConceded = patterns.buckets.reduce((m, b) => Math.max(m, b.conceded), 0);
+  const tagColor = finishingTagColor(patterns.finishingTag);
+
+  return (
+    <View style={styles.patternBlock}>
+      <View style={styles.patternHeader}>
+        <View style={[styles.patternSideDot, { backgroundColor: sideColor }]} />
+        <Text style={[styles.patternTeam, { color: sideColor }]} numberOfLines={1}>{teamName}</Text>
+        {patterns.finishingTag && (
+          <View style={[styles.patternTagBadge, { borderColor: tagColor }]}>
+            <Text style={[styles.patternTagText, { color: tagColor }]}>{patterns.finishingTag}</Text>
+          </View>
+        )}
+      </View>
+
+      <View style={styles.patternMetricsRow}>
+        <View style={styles.patternMetricCell}>
+          <Text style={styles.patternMetricVal}>{patterns.avgScored != null ? patterns.avgScored.toFixed(2) : "—"}</Text>
+          <Text style={styles.patternMetricLabel}>Goals/match</Text>
+        </View>
+        <View style={styles.patternMetricCell}>
+          <Text style={styles.patternMetricVal}>{patterns.avgConceded != null ? patterns.avgConceded.toFixed(2) : "—"}</Text>
+          <Text style={styles.patternMetricLabel}>Conceded/match</Text>
+        </View>
+        <View style={styles.patternMetricCell}>
+          <Text style={styles.patternMetricVal}>{patterns.xgPerMatch != null ? patterns.xgPerMatch.toFixed(2) : "—"}</Text>
+          <Text style={styles.patternMetricLabel}>xG/match</Text>
+        </View>
+        <View style={styles.patternMetricCell}>
+          <Text style={[styles.patternMetricVal, { color: tagColor }]}>
+            {patterns.xgDelta != null ? `${patterns.xgDelta > 0 ? "+" : ""}${patterns.xgDelta.toFixed(2)}` : "—"}
+          </Text>
+          <Text style={styles.patternMetricLabel}>vs xG</Text>
+        </View>
+      </View>
+
+      <View style={styles.patternLegendRow}>
+        <View style={styles.patternLegendItem}>
+          <View style={[styles.patternLegendDot, { backgroundColor: "#22c55e" }]} />
+          <Text style={styles.patternLegendText}>Scored</Text>
+        </View>
+        <View style={styles.patternLegendItem}>
+          <View style={[styles.patternLegendDot, { backgroundColor: "#ef4444" }]} />
+          <Text style={styles.patternLegendText}>Conceded</Text>
+        </View>
+        <Text style={styles.patternLegendMeta}>
+          {patterns.totalScored} scored · {patterns.totalConceded} conceded · {patterns.matchesWithIncidents}/{patterns.matchesAnalyzed} matches
+        </Text>
+      </View>
+
+      {patterns.buckets.map((b) => (
+        <PatternHeatRow
+          key={b.label}
+          bucket={b}
+          side={side}
+          maxScored={maxScored}
+          maxConceded={maxConceded}
+        />
+      ))}
+
+      <View style={styles.patternFactsRow}>
+        {patterns.peakScoringWindow && (
+          <View style={styles.patternFact}>
+            <Text style={styles.patternFactLabel}>Peak window</Text>
+            <Text style={[styles.patternFactValue, { color: "#22c55e" }]}>
+              {patterns.peakScoringWindow}
+              {patterns.peakScoringPct != null ? ` · ${patterns.peakScoringPct.toFixed(0)}%` : ""}
+            </Text>
+          </View>
+        )}
+        {patterns.vulnerabilityWindow && (
+          <View style={styles.patternFact}>
+            <Text style={styles.patternFactLabel}>Vulnerability</Text>
+            <Text style={[styles.patternFactValue, { color: "#ef4444" }]}>
+              {patterns.vulnerabilityWindow}
+              {patterns.vulnerabilityPct != null ? ` · ${patterns.vulnerabilityPct.toFixed(0)}%` : ""}
+            </Text>
+          </View>
+        )}
+        {patterns.avgFirstGoalMin != null && (
+          <View style={styles.patternFact}>
+            <Text style={styles.patternFactLabel}>Avg 1st goal</Text>
+            <Text style={styles.patternFactValue}>{patterns.avgFirstGoalMin.toFixed(0)}′</Text>
+          </View>
+        )}
+        {patterns.avgFirstConcededMin != null && (
+          <View style={styles.patternFact}>
+            <Text style={styles.patternFactLabel}>Avg 1st conceded</Text>
+            <Text style={styles.patternFactValue}>{patterns.avgFirstConcededMin.toFixed(0)}′</Text>
+          </View>
+        )}
+        {patterns.scoredFirstRate != null && (
+          <View style={styles.patternFact}>
+            <Text style={styles.patternFactLabel}>Score first</Text>
+            <Text style={styles.patternFactValue}>
+              {patterns.scoredFirstRate.toFixed(0)}%
+              {patterns.winWhenScoredFirst != null ? ` · ${patterns.winWhenScoredFirst.toFixed(0)}% wins` : ""}
+            </Text>
+          </View>
+        )}
+        {patterns.concededFirstRate != null && (
+          <View style={styles.patternFact}>
+            <Text style={styles.patternFactLabel}>Concede first</Text>
+            <Text style={styles.patternFactValue}>
+              {patterns.concededFirstRate.toFixed(0)}%
+              {patterns.comebackRate != null ? ` · ${patterns.comebackRate.toFixed(0)}% rescue` : ""}
+            </Text>
+          </View>
+        )}
+        {patterns.cleanSheetRate != null && (
+          <View style={styles.patternFact}>
+            <Text style={styles.patternFactLabel}>Clean sheets</Text>
+            <Text style={styles.patternFactValue}>{patterns.cleanSheetRate.toFixed(0)}%</Text>
+          </View>
+        )}
+        {patterns.failedToScoreRate != null && (
+          <View style={styles.patternFact}>
+            <Text style={styles.patternFactLabel}>Failed to score</Text>
+            <Text style={styles.patternFactValue}>{patterns.failedToScoreRate.toFixed(0)}%</Text>
+          </View>
+        )}
+        {patterns.bttsRate != null && (
+          <View style={styles.patternFact}>
+            <Text style={styles.patternFactLabel}>BTTS</Text>
+            <Text style={styles.patternFactValue}>{patterns.bttsRate.toFixed(0)}%</Text>
+          </View>
+        )}
+        {patterns.over25Rate != null && (
+          <View style={styles.patternFact}>
+            <Text style={styles.patternFactLabel}>Over 2.5</Text>
+            <Text style={styles.patternFactValue}>{patterns.over25Rate.toFixed(0)}%</Text>
+          </View>
+        )}
+        {patterns.blownLeadRate != null && patterns.blownLeadRate > 0 && (
+          <View style={styles.patternFact}>
+            <Text style={styles.patternFactLabel}>Blown leads</Text>
+            <Text style={[styles.patternFactValue, { color: "#f97316" }]}>{patterns.blownLeadRate.toFixed(0)}%</Text>
+          </View>
+        )}
+      </View>
+
+      {patterns.styleTags.length > 0 && (
+        <View style={styles.patternTagsWrap}>
+          {patterns.styleTags.map((tag, i) => (
+            <View key={`${tag}-${i}`} style={styles.patternStyleTag}>
+              <Text style={styles.patternStyleTagText}>{tag}</Text>
+            </View>
+          ))}
+        </View>
+      )}
+    </View>
+  );
+}
+
+function ScoringPatternsCard({
+  homeTeamName,
+  awayTeamName,
+  homePatterns,
+  awayPatterns,
+}: {
+  homeTeamName: string;
+  awayTeamName: string;
+  homePatterns?: ScoringPatterns | null;
+  awayPatterns?: ScoringPatterns | null;
+}) {
+  if (!homePatterns && !awayPatterns) return null;
+  const hasAny =
+    (homePatterns?.matchesWithIncidents || 0) > 0 ||
+    (awayPatterns?.matchesWithIncidents || 0) > 0;
+  if (!hasAny) return null;
+
+  return (
+    <View style={styles.phaseCard}>
+      <Text style={styles.cardLabel}>Scoring & Conceding Patterns · Last 15</Text>
+      <Text style={styles.patternIntro}>
+        Goal-timing fingerprint per team — when they strike, when they leak, and what makes them deadly or flop versus their xG.
+      </Text>
+      <PatternSideBlock teamName={homeTeamName} side="home" patterns={homePatterns} />
+      <View style={{ height: 12 }} />
+      <PatternSideBlock teamName={awayTeamName} side="away" patterns={awayPatterns} />
+    </View>
+  );
+}
+
 function TeamStatsCard({
   homeTeamName,
   awayTeamName,
@@ -1443,6 +1732,13 @@ function StadiumSimulationTab({
         awayTeamName={awayTeamName}
         homeSsbi={simulationMetrics?.home?.ssbi}
         awaySsbi={simulationMetrics?.away?.ssbi}
+      />
+
+      <ScoringPatternsCard
+        homeTeamName={homeTeamName}
+        awayTeamName={awayTeamName}
+        homePatterns={simulationMetrics?.home?.scoringPatterns}
+        awayPatterns={simulationMetrics?.away?.scoringPatterns}
       />
 
       <TeamStatsCard
@@ -2204,5 +2500,185 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontFamily: "Inter_400Regular",
     color: Colors.dark.textTertiary,
+  },
+  patternIntro: {
+    fontSize: 11,
+    fontFamily: "Inter_400Regular",
+    color: Colors.dark.textSecondary,
+    marginTop: 4,
+    marginBottom: 10,
+    lineHeight: 15,
+  },
+  patternBlock: {
+    paddingTop: 4,
+  },
+  patternHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginBottom: 8,
+  },
+  patternSideDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+  },
+  patternTeam: {
+    flex: 1,
+    fontSize: 13,
+    fontFamily: "Inter_600SemiBold",
+    marginLeft: 8,
+  },
+  patternTagBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 10,
+    borderWidth: 1,
+  },
+  patternTagText: {
+    fontSize: 10,
+    fontFamily: "Inter_700Bold",
+    letterSpacing: 0.5,
+  },
+  patternMetricsRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    marginBottom: 10,
+    backgroundColor: "rgba(255,255,255,0.03)",
+    borderRadius: 8,
+    paddingVertical: 8,
+    paddingHorizontal: 6,
+  },
+  patternMetricCell: {
+    flex: 1,
+    alignItems: "center",
+  },
+  patternMetricVal: {
+    fontSize: 14,
+    fontFamily: "Inter_700Bold",
+    color: Colors.dark.text,
+  },
+  patternMetricLabel: {
+    fontSize: 9,
+    fontFamily: "Inter_400Regular",
+    color: Colors.dark.textTertiary,
+    marginTop: 2,
+    textTransform: "uppercase",
+    letterSpacing: 0.4,
+  },
+  patternLegendRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginBottom: 6,
+    flexWrap: "wrap",
+  },
+  patternLegendItem: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginRight: 10,
+  },
+  patternLegendDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 2,
+    marginRight: 4,
+  },
+  patternLegendText: {
+    fontSize: 10,
+    fontFamily: "Inter_500Medium",
+    color: Colors.dark.textSecondary,
+  },
+  patternLegendMeta: {
+    flex: 1,
+    textAlign: "right",
+    fontSize: 10,
+    fontFamily: "Inter_400Regular",
+    color: Colors.dark.textTertiary,
+  },
+  patternRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginBottom: 4,
+  },
+  patternBucketLabel: {
+    width: 54,
+    fontSize: 11,
+    fontFamily: "Inter_500Medium",
+    color: Colors.dark.textSecondary,
+  },
+  patternBars: {
+    flex: 1,
+    flexDirection: "row",
+  },
+  patternBarBlock: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    marginHorizontal: 3,
+  },
+  patternBarTrack: {
+    flex: 1,
+    height: 8,
+    backgroundColor: "rgba(255,255,255,0.06)",
+    borderRadius: 4,
+    overflow: "hidden",
+  },
+  patternBarFill: {
+    height: "100%",
+    borderRadius: 4,
+  },
+  patternBarText: {
+    width: 56,
+    textAlign: "right",
+    fontSize: 10,
+    fontFamily: "Inter_600SemiBold",
+    color: Colors.dark.text,
+    marginLeft: 4,
+  },
+  patternBarPct: {
+    fontSize: 9,
+    fontFamily: "Inter_400Regular",
+    color: Colors.dark.textTertiary,
+  },
+  patternFactsRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    marginTop: 10,
+    marginHorizontal: -3,
+  },
+  patternFact: {
+    width: "33.333%",
+    paddingHorizontal: 3,
+    paddingVertical: 4,
+  },
+  patternFactLabel: {
+    fontSize: 9,
+    fontFamily: "Inter_400Regular",
+    color: Colors.dark.textTertiary,
+    textTransform: "uppercase",
+    letterSpacing: 0.4,
+  },
+  patternFactValue: {
+    fontSize: 11,
+    fontFamily: "Inter_600SemiBold",
+    color: Colors.dark.text,
+    marginTop: 1,
+  },
+  patternTagsWrap: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    marginTop: 8,
+  },
+  patternStyleTag: {
+    backgroundColor: "rgba(255,255,255,0.05)",
+    borderRadius: 12,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    marginRight: 4,
+    marginBottom: 4,
+  },
+  patternStyleTagText: {
+    fontSize: 10,
+    fontFamily: "Inter_500Medium",
+    color: Colors.dark.text,
   },
 });
