@@ -2001,22 +2001,25 @@ interface HalfPatternResponse {
 }
 
 function HalfPatternsCard({
+  eventId,
   homeTeamId,
   awayTeamId,
   homeTeamName,
   awayTeamName,
 }: {
+  eventId: number;
   homeTeamId: number;
   awayTeamId: number;
   homeTeamName: string;
   awayTeamName: string;
 }) {
+  const exclude = eventId ? `&excludeEventId=${eventId}` : "";
   const homeQuery = useQuery<HalfPatternResponse>({
-    queryKey: ["/api/team", homeTeamId, "half-patterns?n=7"],
+    queryKey: ["/api/team", homeTeamId, `half-patterns?n=7${exclude}`],
     enabled: !!homeTeamId,
   });
   const awayQuery = useQuery<HalfPatternResponse>({
-    queryKey: ["/api/team", awayTeamId, "half-patterns?n=7"],
+    queryKey: ["/api/team", awayTeamId, `half-patterns?n=7${exclude}`],
     enabled: !!awayTeamId,
   });
 
@@ -2523,6 +2526,7 @@ function StadiumSimulationTab({
       />
 
       <HalfPatternsCard
+        eventId={eventId}
         homeTeamId={homeTeamId}
         awayTeamId={awayTeamId}
         homeTeamName={homeTeamName}

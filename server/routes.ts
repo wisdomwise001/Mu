@@ -3632,12 +3632,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
           return res.status(400).json({ error: "Invalid teamId" });
         }
         const n = Math.max(1, Math.min(15, parseInt(String(req.query.n || "7"), 10) || 7));
+        const excludeEventId = parseInt(String(req.query.excludeEventId || ""), 10);
 
         const allEvents = await fetchTeamLastEvents(teamId);
 
         // Keep only finished matches with both halves available, newest first
         const finished = allEvents
           .filter((ev: any) => {
+            if (excludeEventId && ev?.id === excludeEventId) return false;
             const status = ev?.status?.type;
             const code = ev?.status?.code;
             const ftHome = ev?.homeScore?.current ?? ev?.homeScore?.display;
