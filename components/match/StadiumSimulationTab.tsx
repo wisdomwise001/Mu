@@ -1935,6 +1935,302 @@ function MatchupCrossRefCard({
   );
 }
 
+interface HalfPatternMatch {
+  eventId: number;
+  startTimestamp: number;
+  opponent: string;
+  venue: "H" | "A";
+  ftScore: { team: number; opp: number };
+  htScore: { team: number; opp: number };
+  secondHalfScore: { team: number; opp: number };
+  htResult: "W" | "D" | "L";
+  ftResult: "W" | "D" | "L";
+  goals1H: number;
+  goals2H: number;
+  highestScoringHalf: "first" | "second" | "equal";
+  comebackWin: boolean;
+  lostLead: boolean;
+  heldLead: boolean;
+}
+
+interface HalfPatternResponse {
+  summary: {
+    matchesAnalyzed: number;
+    firstHalfHigherScoring: number;
+    secondHalfHigherScoring: number;
+    equalScoringHalves: number;
+    goalless1HCount: number;
+    goalless2HCount: number;
+    btts1HCount: number;
+    btts2HCount: number;
+    bttsFtCount: number;
+    scored1HCount: number;
+    scored2HCount: number;
+    conceded1HCount: number;
+    conceded2HCount: number;
+    cleanSheet1HCount: number;
+    cleanSheet2HCount: number;
+    cleanSheetFtCount: number;
+    totals: {
+      scored1H: number; scored2H: number;
+      conceded1H: number; conceded2H: number;
+      scoredTotal: number; concededTotal: number;
+    };
+    averages: null | {
+      scored1H: number; scored2H: number;
+      conceded1H: number; conceded2H: number;
+      goalsPerMatch1H: number; goalsPerMatch2H: number;
+    };
+    htResults: { W: number; D: number; L: number };
+    ftResults: { W: number; D: number; L: number };
+    comebackWins: number;
+    lostLeads: number;
+    heldLeads: number;
+    rescuedDraws: number;
+    blewDraws: number;
+  };
+  lean: {
+    scoringLean: "Strong starter" | "Strong finisher" | "Balanced";
+    defensiveLean: "Slow starter (leaks early)" | "Late wobbler (leaks late)" | "Balanced defence";
+    teamGoalShare1H: number;
+    teamGoalShare2H: number;
+    concededShare1H: number;
+    concededShare2H: number;
+  };
+  matches: HalfPatternMatch[];
+}
+
+function HalfPatternsCard({
+  homeTeamId,
+  awayTeamId,
+  homeTeamName,
+  awayTeamName,
+}: {
+  homeTeamId: number;
+  awayTeamId: number;
+  homeTeamName: string;
+  awayTeamName: string;
+}) {
+  const homeQuery = useQuery<HalfPatternResponse>({
+    queryKey: ["/api/team", homeTeamId, "half-patterns?n=7"],
+    enabled: !!homeTeamId,
+  });
+  const awayQuery = useQuery<HalfPatternResponse>({
+    queryKey: ["/api/team", awayTeamId, "half-patterns?n=7"],
+    enabled: !!awayTeamId,
+  });
+
+  const isLoading = homeQuery.isLoading || awayQuery.isLoading;
+  const home = homeQuery.data;
+  const away = awayQuery.data;
+
+  if (isLoading) {
+    return (
+      <View style={styles.phaseCard}>
+        <Text style={styles.cardLabel}>Half-by-half scoring patterns · Last 7</Text>
+        <ActivityIndicator size="small" color={Colors.dark.accent} />
+      </View>
+    );
+  }
+
+  if (!home && !away) return null;
+  if ((home?.summary.matchesAnalyzed || 0) === 0 && (away?.summary.matchesAnalyzed || 0) === 0) {
+    return (
+      <View style={styles.phaseCard}>
+        <Text style={styles.cardLabel}>Half-by-half scoring patterns · Last 7</Text>
+        <Text style={styles.statsNoData}>No completed matches with half-time data available.</Text>
+      </View>
+    );
+  }
+
+  const matchesLabel = `${home?.summary.matchesAnalyzed ?? 0}/${away?.summary.matchesAnalyzed ?? 0} matches`;
+
+  const cmpRows: { label: string; note?: string; pick: (d?: HalfPatternResponse) => string; higherIsBetter?: "home" | "away" | null; sortVal?: (d?: HalfPatternResponse) => number | null }[] = [
+    {
+      label: "Highest scoring half",
+      note: "1H more / 2H more / equal goals",
+      pick: (d) => d ? `${d.summary.firstHalfHigherScoring} · ${d.summary.secondHalfHigherScoring} · ${d.summary.equalScoringHalves}` : "—",
+    },
+    {
+      label: "0-0 first half",
+      note: "matches with no 1H goals (either side)",
+      pick: (d) => d ? `${d.summary.goalless1HCount}/${d.summary.matchesAnalyzed}` : "—",
+      sortVal: (d) => d ? d.summary.goalless1HCount : null,
+    },
+    {
+      label: "0-0 second half",
+      note: "matches with no 2H goals",
+      pick: (d) => d ? `${d.summary.goalless2HCount}/${d.summary.matchesAnalyzed}` : "—",
+      sortVal: (d) => d ? d.summary.goalless2HCount : null,
+    },
+    {
+      label: "Scored in 1H",
+      pick: (d) => d ? `${d.summary.scored1HCount}/${d.summary.matchesAnalyzed}` : "—",
+      sortVal: (d) => d ? d.summary.scored1HCount : null,
+    },
+    {
+      label: "Scored in 2H",
+      pick: (d) => d ? `${d.summary.scored2HCount}/${d.summary.matchesAnalyzed}` : "—",
+      sortVal: (d) => d ? d.summary.scored2HCount : null,
+    },
+    {
+      label: "Conceded in 1H",
+      pick: (d) => d ? `${d.summary.conceded1HCount}/${d.summary.matchesAnalyzed}` : "—",
+      sortVal: (d) => d ? -d.summary.conceded1HCount : null,
+    },
+    {
+      label: "Conceded in 2H",
+      pick: (d) => d ? `${d.summary.conceded2HCount}/${d.summary.matchesAnalyzed}` : "—",
+      sortVal: (d) => d ? -d.summary.conceded2HCount : null,
+    },
+    {
+      label: "Clean sheet 1H / 2H / FT",
+      pick: (d) => d ? `${d.summary.cleanSheet1HCount} · ${d.summary.cleanSheet2HCount} · ${d.summary.cleanSheetFtCount}` : "—",
+    },
+    {
+      label: "BTTS 1H / 2H / FT",
+      pick: (d) => d ? `${d.summary.btts1HCount} · ${d.summary.btts2HCount} · ${d.summary.bttsFtCount}` : "—",
+    },
+    {
+      label: "Avg goals scored 1H · 2H",
+      pick: (d) => d?.summary.averages ? `${d.summary.averages.scored1H} · ${d.summary.averages.scored2H}` : "—",
+    },
+    {
+      label: "Avg goals conceded 1H · 2H",
+      pick: (d) => d?.summary.averages ? `${d.summary.averages.conceded1H} · ${d.summary.averages.conceded2H}` : "—",
+    },
+    {
+      label: "Avg total goals 1H · 2H",
+      pick: (d) => d?.summary.averages ? `${d.summary.averages.goalsPerMatch1H} · ${d.summary.averages.goalsPerMatch2H}` : "—",
+    },
+    {
+      label: "HT result W-D-L",
+      pick: (d) => d ? `${d.summary.htResults.W}-${d.summary.htResults.D}-${d.summary.htResults.L}` : "—",
+      sortVal: (d) => d ? d.summary.htResults.W : null,
+    },
+    {
+      label: "FT result W-D-L",
+      pick: (d) => d ? `${d.summary.ftResults.W}-${d.summary.ftResults.D}-${d.summary.ftResults.L}` : "—",
+      sortVal: (d) => d ? d.summary.ftResults.W : null,
+    },
+    {
+      label: "Held HT lead → win",
+      pick: (d) => d ? `${d.summary.heldLeads}` : "—",
+      sortVal: (d) => d ? d.summary.heldLeads : null,
+    },
+    {
+      label: "Lost HT lead",
+      note: "won at HT, didn't win FT",
+      pick: (d) => d ? `${d.summary.lostLeads}` : "—",
+      sortVal: (d) => d ? -d.summary.lostLeads : null,
+    },
+    {
+      label: "Comeback wins",
+      note: "trailing at HT, won FT",
+      pick: (d) => d ? `${d.summary.comebackWins}` : "—",
+      sortVal: (d) => d ? d.summary.comebackWins : null,
+    },
+  ];
+
+  function sideColor(home?: number | null, away?: number | null) {
+    if (home == null || away == null) return { home: Colors.dark.text, away: Colors.dark.text };
+    if (home > away) return { home: "#4ADE80", away: Colors.dark.textTertiary };
+    if (away > home) return { home: Colors.dark.textTertiary, away: "#4ADE80" };
+    return { home: Colors.dark.text, away: Colors.dark.text };
+  }
+
+  return (
+    <View style={styles.phaseCard}>
+      <Text style={styles.cardLabel}>Half-by-half scoring patterns · {matchesLabel}</Text>
+
+      <View style={styles.statsHeaderRow}>
+        <Text style={[styles.statsHeaderTeam, { color: Colors.dark.homeKit }]} numberOfLines={1}>{homeTeamName}</Text>
+        <Text style={styles.statsHeaderLabel}>Last 7</Text>
+        <Text style={[styles.statsHeaderTeam, { color: Colors.dark.awayKit }]} numberOfLines={1}>{awayTeamName}</Text>
+      </View>
+
+      {cmpRows.map((row) => {
+        const colors = sideColor(
+          row.sortVal ? row.sortVal(home) : null,
+          row.sortVal ? row.sortVal(away) : null,
+        );
+        return (
+          <View key={row.label}>
+            <View style={styles.statsRow}>
+              <Text style={[styles.statsValue, { color: colors.home }]}>{row.pick(home)}</Text>
+              <View style={{ flex: 1, alignItems: "center" }}>
+                <Text style={styles.statsLabel}>{row.label}</Text>
+                {row.note && <Text style={styles.phaseNote} numberOfLines={1}>{row.note}</Text>}
+              </View>
+              <Text style={[styles.statsValue, { color: colors.away, textAlign: "right" }]}>{row.pick(away)}</Text>
+            </View>
+          </View>
+        );
+      })}
+
+      <View style={styles.phaseRow}>
+        <View style={styles.phaseHeader}>
+          <Text style={styles.phaseLabel}>Behavioural lean</Text>
+          <Text style={styles.phaseNote}>Where each team's goals & concessions cluster</Text>
+        </View>
+        <View style={styles.phaseScores}>
+          <Text style={[styles.phaseScore, { color: Colors.dark.homeKit }]}>
+            {homeTeamName}: {home?.lean.scoringLean ?? "—"} · {home?.lean.defensiveLean ?? "—"}
+            {home?.lean ? ` (1H ${home.lean.teamGoalShare1H}% / 2H ${home.lean.teamGoalShare2H}% scored)` : ""}
+          </Text>
+          <Text style={[styles.phaseScore, { color: Colors.dark.awayKit }]}>
+            {awayTeamName}: {away?.lean.scoringLean ?? "—"} · {away?.lean.defensiveLean ?? "—"}
+            {away?.lean ? ` (1H ${away.lean.teamGoalShare1H}% / 2H ${away.lean.teamGoalShare2H}% scored)` : ""}
+          </Text>
+        </View>
+      </View>
+
+      <HalfPatternMatchList teamName={homeTeamName} color={Colors.dark.homeKit} matches={home?.matches} />
+      <HalfPatternMatchList teamName={awayTeamName} color={Colors.dark.awayKit} matches={away?.matches} />
+    </View>
+  );
+}
+
+function HalfPatternMatchList({
+  teamName,
+  color,
+  matches,
+}: {
+  teamName: string;
+  color: string;
+  matches?: HalfPatternMatch[];
+}) {
+  if (!matches || matches.length === 0) return null;
+  return (
+    <View style={styles.phaseRow}>
+      <Text style={[styles.phaseLabel, { color }]} numberOfLines={1}>{teamName} · last {matches.length}</Text>
+      {matches.map((m) => {
+        const tag =
+          m.comebackWin ? "Comeback W" :
+          m.lostLead ? "Lost HT lead" :
+          m.heldLead ? "Held HT lead" :
+          m.htResult === m.ftResult ? `${m.htResult} HT → ${m.ftResult} FT` :
+          `${m.htResult} HT → ${m.ftResult} FT`;
+        const tagColor =
+          m.comebackWin ? "#4ADE80" :
+          m.lostLead ? "#F87171" :
+          m.heldLead ? "#60A5FA" :
+          Colors.dark.textTertiary;
+        return (
+          <View key={m.eventId} style={styles.halfMatchRow}>
+            <Text style={styles.halfMatchVenue}>{m.venue}</Text>
+            <Text style={styles.halfMatchOpp} numberOfLines={1}>{m.opponent}</Text>
+            <Text style={styles.halfMatchScore}>
+              HT {m.htScore.team}-{m.htScore.opp} · 2H {m.secondHalfScore.team}-{m.secondHalfScore.opp} · FT {m.ftScore.team}-{m.ftScore.opp}
+            </Text>
+            <Text style={[styles.halfMatchTag, { color: tagColor }]} numberOfLines={1}>{tag}</Text>
+          </View>
+        );
+      })}
+    </View>
+  );
+}
+
 function TeamStatsCard({
   homeTeamName,
   awayTeamName,
@@ -2224,6 +2520,13 @@ function StadiumSimulationTab({
         awayTeamName={awayTeamName}
         homePatterns={simulationMetrics?.home?.scoringPatterns}
         awayPatterns={simulationMetrics?.away?.scoringPatterns}
+      />
+
+      <HalfPatternsCard
+        homeTeamId={homeTeamId}
+        awayTeamId={awayTeamId}
+        homeTeamName={homeTeamName}
+        awayTeamName={awayTeamName}
       />
 
       <CausalAnalysisCard
@@ -2807,6 +3110,36 @@ const styles = StyleSheet.create({
     flex: 1,
     fontSize: 11,
     fontFamily: "Inter_700Bold",
+  },
+  halfMatchRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingVertical: 4,
+  },
+  halfMatchVenue: {
+    fontSize: 10,
+    fontFamily: "Inter_700Bold",
+    color: Colors.dark.textTertiary,
+    width: 14,
+  },
+  halfMatchOpp: {
+    fontSize: 11,
+    fontFamily: "Inter_600SemiBold",
+    color: Colors.dark.text,
+    width: 90,
+  },
+  halfMatchScore: {
+    flex: 1,
+    fontSize: 10,
+    fontFamily: "Inter_500Medium",
+    color: Colors.dark.textSecondary,
+  },
+  halfMatchTag: {
+    fontSize: 10,
+    fontFamily: "Inter_700Bold",
+    width: 96,
+    textAlign: "right",
   },
   liveCard: {
     backgroundColor: Colors.dark.card,

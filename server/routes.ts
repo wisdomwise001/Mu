@@ -3622,6 +3622,202 @@ export async function registerRoutes(app: Express): Promise<Server> {
     },
   );
 
+  // ─── Half-by-half scoring patterns for the team's last N matches ───────────
+  app.get(
+    "/api/team/:teamId/half-patterns",
+    async (req: Request, res: Response) => {
+      try {
+        const teamId = parseInt(req.params.teamId, 10);
+        if (!teamId || Number.isNaN(teamId)) {
+          return res.status(400).json({ error: "Invalid teamId" });
+        }
+        const n = Math.max(1, Math.min(15, parseInt(String(req.query.n || "7"), 10) || 7));
+
+        const allEvents = await fetchTeamLastEvents(teamId);
+
+        // Keep only finished matches with both halves available, newest first
+        const finished = allEvents
+          .filter((ev: any) => {
+            const status = ev?.status?.type;
+            const code = ev?.status?.code;
+            const ftHome = ev?.homeScore?.current ?? ev?.homeScore?.display;
+            const ftAway = ev?.awayScore?.current ?? ev?.awayScore?.display;
+            const htHome = ev?.homeScore?.period1;
+            const htAway = ev?.awayScore?.period1;
+            return (
+              (status === "finished" || code === 100) &&
+              typeof ftHome === "number" &&
+              typeof ftAway === "number" &&
+              typeof htHome === "number" &&
+              typeof htAway === "number"
+            );
+          })
+          .sort((a: any, b: any) => (b?.startTimestamp || 0) - (a?.startTimestamp || 0))
+          .slice(0, n);
+
+        const matches = finished.map((ev: any) => {
+          const isHome = ev?.homeTeam?.id === teamId;
+          const teamFt = isHome ? ev.homeScore.current : ev.awayScore.current;
+          const oppFt = isHome ? ev.awayScore.current : ev.homeScore.current;
+          const teamHt = isHome ? ev.homeScore.period1 : ev.awayScore.period1;
+          const oppHt = isHome ? ev.awayScore.period1 : ev.homeScore.period1;
+          const team2h = teamFt - teamHt;
+          const opp2h = oppFt - oppHt;
+
+          const htResult: "W" | "D" | "L" =
+            teamHt > oppHt ? "W" : teamHt < oppHt ? "L" : "D";
+          const ftResult: "W" | "D" | "L" =
+            teamFt > oppFt ? "W" : teamFt < oppFt ? "L" : "D";
+
+          const opponentName = isHome ? ev?.awayTeam?.name : ev?.homeTeam?.name;
+
+          let highestScoringHalf: "first" | "second" | "equal" = "equal";
+          const goals1H = teamHt + oppHt;
+          const goals2H = team2h + opp2h;
+          if (goals1H > goals2H) highestScoringHalf = "first";
+          else if (goals2H > goals1H) highestScoringHalf = "second";
+
+          return {
+            eventId: ev?.id,
+            startTimestamp: ev?.startTimestamp,
+            opponent: opponentName,
+            venue: isHome ? "H" : "A",
+            ftScore: { team: teamFt, opp: oppFt },
+            htScore: { team: teamHt, opp: oppHt },
+            secondHalfScore: { team: team2h, opp: opp2h },
+            htResult,
+            ftResult,
+            goals1H,
+            goals2H,
+            highestScoringHalf,
+            scored1H: teamHt > 0,
+            scored2H: team2h > 0,
+            conceded1H: oppHt > 0,
+            conceded2H: opp2h > 0,
+            btts1H: teamHt > 0 && oppHt > 0,
+            btts2H: team2h > 0 && opp2h > 0,
+            bttsFt: teamFt > 0 && oppFt > 0,
+            cleanSheet1H: oppHt === 0,
+            cleanSheet2H: opp2h === 0,
+            cleanSheetFt: oppFt === 0,
+            goalless1H: goals1H === 0,
+            goalless2H: goals2H === 0,
+            comebackWin: htResult === "L" && ftResult === "W",
+            lostLead: htResult === "W" && ftResult !== "W",
+            heldLead: htResult === "W" && ftResult === "W",
+            rescuedDraw: htResult === "L" && ftResult === "D",
+            blewDraw: htResult === "D" && ftResult === "L",
+          };
+        });
+
+        const total = matches.length;
+        const sum = (pred: (m: typeof matches[number]) => boolean) =>
+          matches.filter(pred).length;
+        const sumNum = (sel: (m: typeof matches[number]) => number) =>
+          matches.reduce((acc, m) => acc + sel(m), 0);
+
+        const scored1HTotal = sumNum((m) => m.htScore.team);
+        const scored2HTotal = sumNum((m) => m.secondHalfScore.team);
+        const conceded1HTotal = sumNum((m) => m.htScore.opp);
+        const conceded2HTotal = sumNum((m) => m.secondHalfScore.opp);
+
+        const summary = {
+          matchesAnalyzed: total,
+          // half-vs-half scoring distribution
+          firstHalfHigherScoring: sum((m) => m.highestScoringHalf === "first"),
+          secondHalfHigherScoring: sum((m) => m.highestScoringHalf === "second"),
+          equalScoringHalves: sum((m) => m.highestScoringHalf === "equal"),
+          // 0-0 halves
+          goalless1HCount: sum((m) => m.goalless1H),
+          goalless2HCount: sum((m) => m.goalless2H),
+          // BTTS
+          btts1HCount: sum((m) => m.btts1H),
+          btts2HCount: sum((m) => m.btts2H),
+          bttsFtCount: sum((m) => m.bttsFt),
+          // Team scored / conceded by half
+          scored1HCount: sum((m) => m.scored1H),
+          scored2HCount: sum((m) => m.scored2H),
+          conceded1HCount: sum((m) => m.conceded1H),
+          conceded2HCount: sum((m) => m.conceded2H),
+          // Clean sheets
+          cleanSheet1HCount: sum((m) => m.cleanSheet1H),
+          cleanSheet2HCount: sum((m) => m.cleanSheet2H),
+          cleanSheetFtCount: sum((m) => m.cleanSheetFt),
+          // Goal totals & averages
+          totals: {
+            scored1H: scored1HTotal,
+            scored2H: scored2HTotal,
+            conceded1H: conceded1HTotal,
+            conceded2H: conceded2HTotal,
+            scoredTotal: scored1HTotal + scored2HTotal,
+            concededTotal: conceded1HTotal + conceded2HTotal,
+          },
+          averages: total > 0 ? {
+            scored1H: +(scored1HTotal / total).toFixed(2),
+            scored2H: +(scored2HTotal / total).toFixed(2),
+            conceded1H: +(conceded1HTotal / total).toFixed(2),
+            conceded2H: +(conceded2HTotal / total).toFixed(2),
+            goalsPerMatch1H: +((scored1HTotal + conceded1HTotal) / total).toFixed(2),
+            goalsPerMatch2H: +((scored2HTotal + conceded2HTotal) / total).toFixed(2),
+          } : null,
+          // HT / FT distribution
+          htResults: {
+            W: sum((m) => m.htResult === "W"),
+            D: sum((m) => m.htResult === "D"),
+            L: sum((m) => m.htResult === "L"),
+          },
+          ftResults: {
+            W: sum((m) => m.ftResult === "W"),
+            D: sum((m) => m.ftResult === "D"),
+            L: sum((m) => m.ftResult === "L"),
+          },
+          // HT → FT transitions
+          comebackWins: sum((m) => m.comebackWin),
+          lostLeads: sum((m) => m.lostLead),
+          heldLeads: sum((m) => m.heldLead),
+          rescuedDraws: sum((m) => m.rescuedDraw),
+          blewDraws: sum((m) => m.blewDraw),
+        };
+
+        // Behavioural lean derived from raw counts
+        const teamGoalShare1H = summary.totals.scoredTotal > 0
+          ? scored1HTotal / summary.totals.scoredTotal
+          : 0;
+        const teamGoalShare2H = summary.totals.scoredTotal > 0
+          ? scored2HTotal / summary.totals.scoredTotal
+          : 0;
+        const concededShare1H = summary.totals.concededTotal > 0
+          ? conceded1HTotal / summary.totals.concededTotal
+          : 0;
+        const concededShare2H = summary.totals.concededTotal > 0
+          ? conceded2HTotal / summary.totals.concededTotal
+          : 0;
+
+        let scoringLean: "Strong starter" | "Strong finisher" | "Balanced" = "Balanced";
+        if (teamGoalShare2H - teamGoalShare1H >= 0.2) scoringLean = "Strong finisher";
+        else if (teamGoalShare1H - teamGoalShare2H >= 0.2) scoringLean = "Strong starter";
+
+        let defensiveLean: "Slow starter (leaks early)" | "Late wobbler (leaks late)" | "Balanced defence" = "Balanced defence";
+        if (concededShare1H - concededShare2H >= 0.2) defensiveLean = "Slow starter (leaks early)";
+        else if (concededShare2H - concededShare1H >= 0.2) defensiveLean = "Late wobbler (leaks late)";
+
+        const lean = {
+          scoringLean,
+          defensiveLean,
+          teamGoalShare1H: +(teamGoalShare1H * 100).toFixed(1),
+          teamGoalShare2H: +(teamGoalShare2H * 100).toFixed(1),
+          concededShare1H: +(concededShare1H * 100).toFixed(1),
+          concededShare2H: +(concededShare2H * 100).toFixed(1),
+        };
+
+        res.json({ summary, lean, matches });
+      } catch (error: any) {
+        console.error("half-patterns error:", error?.message);
+        res.status(500).json({ error: error?.message || "Failed to compute half patterns" });
+      }
+    },
+  );
+
   app.get(
     "/api/team/:teamId/image",
     async (req: Request, res: Response) => {
