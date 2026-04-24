@@ -2179,31 +2179,36 @@ function HighestScoringHalfCard({
 
   const total1H = homeC.h1 + awayC.h1;
   const total2H = homeC.h2 + awayC.h2;
+  const totalExpected = total1H + total2H;
   const diff = total2H - total1H;
   const maxT = Math.max(total1H, total2H);
   const marginPct = maxT > 0 ? Math.abs(diff) / maxT : 0;
 
   type Verdict = "first" | "second" | "draw";
-  const verdict: Verdict = marginPct < 0.10 ? "draw" : diff > 0 ? "second" : "first";
-  const confidence: "Low" | "Medium" | "High" =
-    marginPct < 0.10 ? "Low" : marginPct < 0.22 ? "Medium" : "High";
-  const verdictLabel = verdict === "first" ? "First Half" : verdict === "second" ? "Second Half" : "Draw / Even";
-  const verdictColor = verdict === "draw" ? "#eab308" : verdict === "second" ? "#3b82f6" : "#f97316";
 
   // Build reasoning signals (each says which side it leans + magnitude)
   type Signal = { text: string; leans: Verdict; weight: number };
   const signals: Signal[] = [];
-  const signalDelta = (a: number | null | undefined, b: number | null | undefined): { leans: Verdict; weight: number } => {
+  // signalDelta now scales weight by absolute magnitude. When both sides are
+  // tiny (e.g. 0.05 vs 0.10), the relative ratio is 50% but the absolute
+  // signal is noise; we cap such weights so they cannot dominate the tally.
+  const signalDelta = (
+    a: number | null | undefined,
+    b: number | null | undefined,
+    noiseFloor = 0.4,
+  ): { leans: Verdict; weight: number } => {
     if (a == null || b == null || !Number.isFinite(a) || !Number.isFinite(b)) return { leans: "draw", weight: 0 };
     const d = b - a;
     const m = Math.max(Math.abs(a), Math.abs(b));
     if (m === 0) return { leans: "draw", weight: 0 };
     const ratio = Math.abs(d) / m;
-    return { leans: ratio < 0.10 ? "draw" : d > 0 ? "second" : "first", weight: ratio };
+    const magnitudeScale = Math.min(1, m / noiseFloor); // 0..1
+    const weight = ratio * magnitudeScale;
+    return { leans: ratio < 0.10 ? "draw" : d > 0 ? "second" : "first", weight };
   };
 
-  const push = (text: string, a: number | null | undefined, b: number | null | undefined) => {
-    const { leans, weight } = signalDelta(a, b);
+  const push = (text: string, a: number | null | undefined, b: number | null | undefined, noiseFloor = 0.4) => {
+    const { leans, weight } = signalDelta(a, b, noiseFloor);
     if (weight > 0) signals.push({ text, leans, weight });
   };
 
@@ -2295,6 +2300,42 @@ function HighestScoringHalfCard({
   if (homeLean && homeLean.who !== "draw") signals.push({ text: `${homeTeamName} ${homeLean.t}`, leans: homeLean.who, weight: 0.5 });
   if (awayLean && awayLean.who !== "draw") signals.push({ text: `${awayTeamName} ${awayLean.t}`, leans: awayLean.who, weight: 0.5 });
 
+  // ─── Goalless-fixture awareness ──────────────────────────────────────────
+  // If both teams frequently produce goalless halves (Last 7) or the absolute
+  // expected goals are low, push a draw-leaning signal so the verdict can land
+  // on "Draw / Even" instead of forcing one half to win on noise.
+  const matchesH = homeHpD?.summary?.matchesAnalyzed || 0;
+  const matchesA = awayHpD?.summary?.matchesAnalyzed || 0;
+  const goallessHomeAny =
+    matchesH > 0
+      ? ((homeHpD?.summary?.goalless1HCount || 0) + (homeHpD?.summary?.goalless2HCount || 0)) /
+        (2 * matchesH)
+      : null;
+  const goallessAwayAny =
+    matchesA > 0
+      ? ((awayHpD?.summary?.goalless1HCount || 0) + (awayHpD?.summary?.goalless2HCount || 0)) /
+        (2 * matchesA)
+      : null;
+  const goallessAvg =
+    goallessHomeAny != null && goallessAwayAny != null
+      ? (goallessHomeAny + goallessAwayAny) / 2
+      : (goallessHomeAny ?? goallessAwayAny ?? 0);
+
+  if (goallessAvg >= 0.4 && matchesH > 0 && matchesA > 0) {
+    signals.push({
+      text: `Goalless-half rate: ${homeTeamName} ${Math.round((goallessHomeAny || 0) * 100)}% · ${awayTeamName} ${Math.round((goallessAwayAny || 0) * 100)}% — high chance both halves stay quiet`,
+      leans: "draw",
+      weight: Math.min(1.5, goallessAvg * 1.6),
+    });
+  }
+  if (totalExpected > 0 && totalExpected < 2.0) {
+    signals.push({
+      text: `Total expected goals only ${totalExpected.toFixed(2)} — low-scoring fixture, halves likely close`,
+      leans: "draw",
+      weight: Math.min(1.2, (2.0 - totalExpected) * 0.9),
+    });
+  }
+
   // Merge in context-aware signals from /api/event/:id/half-context
   const ctxData = halfCtx.data;
   const contextSignals: Signal[] = (ctxData?.signals || []).map((s) => ({
@@ -2317,6 +2358,46 @@ function HighestScoringHalfCard({
     },
     { first: 0, second: 0, draw: 0 },
   );
+
+  // ─── Verdict & confidence from BOTH expected goals and signal tally ──────
+  // Re-derive verdict so that:
+  //   1. A strong "draw" tally (e.g. goalless-fixture risk) can win
+  //   2. Confidence is capped when total expected goals are modest
+  const tallyTotal = tally.first + tally.second + tally.draw;
+  const tallyMaxKey: Verdict =
+    tally.first >= tally.second && tally.first >= tally.draw
+      ? "first"
+      : tally.second >= tally.draw
+        ? "second"
+        : "draw";
+  const tallyMax = Math.max(tally.first, tally.second, tally.draw);
+  const tallyShare = tallyTotal > 0 ? tallyMax / tallyTotal : 0;
+
+  // Goal-margin based verdict (the legacy behaviour)
+  const goalVerdict: Verdict = marginPct < 0.10 ? "draw" : diff > 0 ? "second" : "first";
+
+  // Final verdict: prefer the tally winner unless it's only marginally ahead
+  // of the goal-based verdict.
+  let verdict: Verdict;
+  if (tallyShare >= 0.45 && tallyMaxKey !== goalVerdict && tally.draw === tallyMax) {
+    verdict = "draw"; // strong draw signal overrides
+  } else if (tallyShare >= 0.55) {
+    verdict = tallyMaxKey;
+  } else {
+    verdict = goalVerdict;
+  }
+
+  // Confidence: based on (margin between top tally and runner-up) AND total
+  // expected goals magnitude. Modest totals → cap at Medium. Tiny totals → Low.
+  const sortedTally = [tally.first, tally.second, tally.draw].sort((a, b) => b - a);
+  const tallyMargin = tallyTotal > 0 ? (sortedTally[0] - sortedTally[1]) / tallyTotal : 0;
+  let confidence: "Low" | "Medium" | "High" =
+    tallyMargin >= 0.35 ? "High" : tallyMargin >= 0.15 ? "Medium" : "Low";
+  if (totalExpected < 1.5) confidence = "Low";
+  else if (totalExpected < 2.3 && confidence === "High") confidence = "Medium";
+
+  const verdictLabel = verdict === "first" ? "First Half" : verdict === "second" ? "Second Half" : "Draw / Even";
+  const verdictColor = verdict === "draw" ? "#eab308" : verdict === "second" ? "#3b82f6" : "#f97316";
 
   const fmt2 = (v: number) => (Math.round(v * 100) / 100).toFixed(2);
   const verdictBadgeColor = (v: Verdict) =>
