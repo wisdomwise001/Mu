@@ -4,6 +4,7 @@ import OpenAI from "openai";
 import db from "./db";
 import engine, { extractFeatures, FEATURE_NAMES } from "./xgEngine";
 import { proxyFetch } from "./proxyFetch";
+import { computeHalfContext } from "./halfContext";
 
 const openai = new OpenAI({
   apiKey: process.env.AI_INTEGRATIONS_OPENAI_API_KEY,
@@ -4231,6 +4232,42 @@ export async function registerRoutes(app: Express): Promise<Server> {
       } catch (error: any) {
         console.error("half-patterns error:", error?.message);
         res.status(500).json({ error: error?.message || "Failed to compute half patterns" });
+      }
+    },
+  );
+
+  // ─── Context-aware "highest scoring half" signals ─────────────────────────
+  app.get(
+    "/api/event/:eventId/half-context",
+    async (req: Request, res: Response) => {
+      try {
+        const eventId = parseInt(req.params.eventId, 10);
+        if (!eventId || Number.isNaN(eventId)) {
+          return res.status(400).json({ error: "Invalid eventId" });
+        }
+        const homeStyleTags = (req.query.homeStyleTags as string | undefined)
+          ?.split("|")
+          .filter(Boolean) || [];
+        const awayStyleTags = (req.query.awayStyleTags as string | undefined)
+          ?.split("|")
+          .filter(Boolean) || [];
+        const homeWin = req.query.homeWin ? Number(req.query.homeWin) : undefined;
+        const drawOdds = req.query.draw ? Number(req.query.draw) : undefined;
+        const awayWin = req.query.awayWin ? Number(req.query.awayWin) : undefined;
+        const odds =
+          homeWin && awayWin && Number.isFinite(homeWin) && Number.isFinite(awayWin)
+            ? { homeWin, draw: drawOdds, awayWin }
+            : null;
+
+        const ctx = await computeHalfContext(eventId, {
+          homeStyleTags,
+          awayStyleTags,
+          odds,
+        });
+        res.json(ctx);
+      } catch (error: any) {
+        console.error("half-context error:", error?.message);
+        res.status(500).json({ error: error?.message || "Failed to compute half context" });
       }
     },
   );

@@ -1985,6 +1985,47 @@ interface HalfPatternMatch {
   heldLead: boolean;
 }
 
+type HalfLean = "first" | "second" | "draw";
+
+interface ContextSignal {
+  kind: string;
+  label: string;
+  leans: HalfLean;
+  weight: number;
+  detail?: string;
+}
+
+interface HalfContextResponse {
+  signals: ContextSignal[];
+  context: {
+    knockout: {
+      isKnockout: boolean;
+      stage: string | null;
+      isSecondLeg: boolean;
+      aggregateLead: { team: "home" | "away" | null; goals: number } | null;
+      trailingNeedsGoals: boolean;
+      legOneScore: { home: number; away: number } | null;
+    };
+    pressure: {
+      home: { status: string; motivation: number; position: number; totalTeams: number; pointsFromSafety: number | null; pointsFromTop: number | null } | null;
+      away: { status: string; motivation: number; position: number; totalTeams: number; pointsFromSafety: number | null; pointsFromTop: number | null } | null;
+      asymmetry: number;
+    };
+    fatigue: {
+      home: { daysSinceLast: number | null; matchesIn14Days: number; matchesIn21Days: number; fatigueIndex: number };
+      away: { daysSinceLast: number | null; matchesIn14Days: number; matchesIn21Days: number; fatigueIndex: number };
+      asymmetry: number;
+    };
+    subPatterns: {
+      home: { avgFirstSubMinute: number | null; avgAllSubMinute: number | null; earlySubsRate: number; lateSubsRate: number; conservative: boolean } | null;
+      away: { avgFirstSubMinute: number | null; avgAllSubMinute: number | null; earlySubsRate: number; lateSubsRate: number; conservative: boolean } | null;
+    };
+    styleClash: { description: string; lean: HalfLean } | null;
+    odds: { favorite: "home" | "away" | "even" | null; gap: number } | null;
+    stage: { label: string; modifier: HalfLean | null };
+  };
+}
+
 interface HalfPatternResponse {
   summary: {
     matchesAnalyzed: number;
@@ -2055,6 +2096,11 @@ function HighestScoringHalfCard({
   const awayHP = useQuery<HalfPatternResponse>({
     queryKey: ["/api/team", awayTeamId, `half-patterns?n=7${exclude}`],
     enabled: !!awayTeamId,
+  });
+  const halfCtx = useQuery<HalfContextResponse>({
+    queryKey: ["/api/event", eventId, "half-context"],
+    enabled: !!eventId,
+    staleTime: 5 * 60 * 1000,
   });
 
   if (homeHP.isLoading || awayHP.isLoading) {
@@ -2249,8 +2295,17 @@ function HighestScoringHalfCard({
   if (homeLean && homeLean.who !== "draw") signals.push({ text: `${homeTeamName} ${homeLean.t}`, leans: homeLean.who, weight: 0.5 });
   if (awayLean && awayLean.who !== "draw") signals.push({ text: `${awayTeamName} ${awayLean.t}`, leans: awayLean.who, weight: 0.5 });
 
+  // Merge in context-aware signals from /api/event/:id/half-context
+  const ctxData = halfCtx.data;
+  const contextSignals: Signal[] = (ctxData?.signals || []).map((s) => ({
+    text: s.label,
+    leans: s.leans,
+    weight: s.weight,
+  }));
+  signals.push(...contextSignals);
+
   signals.sort((a, b) => b.weight - a.weight);
-  const topSignals = signals.slice(0, 7);
+  const topSignals = signals.slice(0, 10);
 
   // Tally signal alignment
   const tally = signals.reduce(
@@ -2301,6 +2356,49 @@ function HighestScoringHalfCard({
         <Text style={[styles.statsValue, { color: Colors.dark.text, textAlign: "right" }]}>{fmt2(awayC.h2)}</Text>
       </View>
 
+      {ctxData ? (
+        <View style={{ marginTop: 10, padding: 8, borderRadius: 8, backgroundColor: "rgba(255,255,255,0.04)" }}>
+          <Text style={[styles.statsSectionLabel, { marginBottom: 4 }]}>Match-day context</Text>
+          {ctxData.context.knockout.isKnockout && (
+            <Text style={styles.signalText}>
+              Stage: {ctxData.context.knockout.stage}
+              {ctxData.context.knockout.isSecondLeg && ctxData.context.knockout.legOneScore
+                ? ` · 2nd leg (leg 1: ${ctxData.context.knockout.legOneScore.home}-${ctxData.context.knockout.legOneScore.away})`
+                : ""}
+            </Text>
+          )}
+          {(ctxData.context.pressure.home || ctxData.context.pressure.away) && (
+            <Text style={styles.signalText}>
+              Standings —{" "}
+              {ctxData.context.pressure.home
+                ? `${homeTeamName}: #${ctxData.context.pressure.home.position}/${ctxData.context.pressure.home.totalTeams} (${ctxData.context.pressure.home.status})`
+                : ""}
+              {ctxData.context.pressure.home && ctxData.context.pressure.away ? " · " : ""}
+              {ctxData.context.pressure.away
+                ? `${awayTeamName}: #${ctxData.context.pressure.away.position}/${ctxData.context.pressure.away.totalTeams} (${ctxData.context.pressure.away.status})`
+                : ""}
+            </Text>
+          )}
+          {(ctxData.context.fatigue.home.daysSinceLast != null || ctxData.context.fatigue.away.daysSinceLast != null) && (
+            <Text style={styles.signalText}>
+              Rest — {homeTeamName}: {ctxData.context.fatigue.home.daysSinceLast ?? "?"}d
+              ({ctxData.context.fatigue.home.matchesIn21Days} in 21d) · {awayTeamName}:{" "}
+              {ctxData.context.fatigue.away.daysSinceLast ?? "?"}d ({ctxData.context.fatigue.away.matchesIn21Days} in 21d)
+            </Text>
+          )}
+          {(ctxData.context.subPatterns.home?.avgFirstSubMinute || ctxData.context.subPatterns.away?.avgFirstSubMinute) && (
+            <Text style={styles.signalText}>
+              First sub avg — {homeTeamName}: {ctxData.context.subPatterns.home?.avgFirstSubMinute ?? "?"}'
+              {ctxData.context.subPatterns.home?.conservative ? " (conservative)" : ""} ·{" "}
+              {awayTeamName}: {ctxData.context.subPatterns.away?.avgFirstSubMinute ?? "?"}'
+              {ctxData.context.subPatterns.away?.conservative ? " (conservative)" : ""}
+            </Text>
+          )}
+        </View>
+      ) : halfCtx.isLoading ? (
+        <Text style={[styles.signalText, { marginTop: 8, opacity: 0.6 }]}>Loading match-day context…</Text>
+      ) : null}
+
       <Text style={[styles.statsSectionLabel, { marginTop: 10 }]}>Top reasoning signals</Text>
       {topSignals.length === 0 ? (
         <Text style={styles.statsNoData}>Not enough data to derive signals.</Text>
@@ -2315,7 +2413,7 @@ function HighestScoringHalfCard({
       ))}
 
       <Text style={styles.modeCaption}>
-        Method: blends Last 15 raw averages, opponent-quality-weighted Last 15, Last 7 half patterns and xG/big-chance half splits. Opponent's defensive vulnerability per half is mixed in. Margin under 10% returns Draw.
+        Method: blends Last 15 raw averages, opponent-quality-weighted Last 15, Last 7 half patterns and xG/big-chance half splits. Layered with match-day context: knockout stage, standings pressure & motivation asymmetry, fixture congestion / fatigue, coach sub patterns, style clash. Margin under 10% returns Draw.
       </Text>
     </View>
   );
