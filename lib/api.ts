@@ -141,10 +141,21 @@ export async function fetchScheduledEvents(
 ): Promise<SofaEvent[]> {
   const baseUrl = getApiUrl();
   const url = `${baseUrl}api/sport/${sport}/scheduled-events/${date}`;
-  const res = await fetch(url);
-  if (!res.ok) {
-    throw new Error(`Failed to fetch events: ${res.status}`);
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 45000);
+  try {
+    const res = await fetch(url, { signal: controller.signal });
+    clearTimeout(timeoutId);
+    if (!res.ok) {
+      throw new Error(`Failed to fetch events: ${res.status}`);
+    }
+    const data = await res.json();
+    return data.events || [];
+  } catch (err: any) {
+    clearTimeout(timeoutId);
+    if (err?.name === "AbortError") {
+      throw new Error("Request timed out. Check your proxy settings.");
+    }
+    throw err;
   }
-  const data = await res.json();
-  return data.events || [];
 }

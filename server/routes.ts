@@ -2221,7 +2221,7 @@ let proxyScrapeState: {
   running: boolean;
   progress: string;
   error: string | null;
-  result: { added: number; total: number } | null;
+  result: { added: number; total: number; verified: number } | null;
   lastRun: string | null;
 } = { running: false, progress: "", error: null, result: null, lastRun: null };
 
@@ -2240,8 +2240,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
           proxyScrapeState.progress = msg;
           console.log("[proxy-scraper]", msg);
         });
-        proxyScrapeState.result = { added: result.added, total: result.total };
-        proxyScrapeState.progress = `Done — ${result.added} proxies saved`;
+        proxyScrapeState.result = { added: result.added, total: result.total, verified: result.verified };
+        proxyScrapeState.progress = `Done — ${result.verified} verified proxies saved (from ${result.total} raw)`;
         proxyScrapeState.lastRun = new Date().toISOString();
         reloadProxies();
         console.log(`[proxy-scraper] Reloaded pool with ${result.added} proxies`);

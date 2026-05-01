@@ -21,8 +21,8 @@ type ProxyState = {
 };
 
 const PROXIES_PATH = path.join(process.cwd(), "data", "proxies.json");
-const REQUEST_TIMEOUT_MS = 12000;
-const MAX_PROXY_ATTEMPTS = 8;
+const REQUEST_TIMEOUT_MS = 6000;
+const MAX_PROXY_ATTEMPTS = 5;
 const FAILURE_BLACKLIST_THRESHOLD = 3;
 
 let allProxies: ProxyState[] = [];

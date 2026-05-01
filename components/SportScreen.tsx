@@ -46,13 +46,15 @@ export default function SportScreen({ sport, title }: SportScreenProps) {
     data: events,
     isLoading,
     isRefetching,
+    isError,
+    error,
     refetch,
   } = useQuery({
     queryKey: ["events", sport, dateStr],
     queryFn: () => fetchScheduledEvents(sport, dateStr),
     staleTime: 30_000,
     refetchInterval: 60_000,
-    retry: 2,
+    retry: 1,
   });
 
   const dateEvents = useMemo(
@@ -166,6 +168,20 @@ export default function SportScreen({ sport, title }: SportScreenProps) {
         <View style={styles.loadingContainer}>
           <ActivityIndicator size="large" color={Colors.dark.accent} />
           <Text style={styles.loadingText}>Loading fixtures...</Text>
+        </View>
+      ) : isError ? (
+        <View style={styles.emptyContainer}>
+          <Ionicons name="cloud-offline-outline" size={48} color={Colors.dark.textTertiary} />
+          <Text style={styles.emptyText}>Could not load fixtures</Text>
+          <Text style={styles.emptySubtext}>
+            {(error as Error)?.message?.includes("500")
+              ? "Proxy connection failed. Tap refresh proxies in the app or try again later."
+              : (error as Error)?.message || "Network error. Please try again."}
+          </Text>
+          <TouchableOpacity onPress={() => refetch()} style={styles.retryButton}>
+            <Ionicons name="refresh" size={16} color="#fff" />
+            <Text style={styles.retryButtonText}>Retry</Text>
+          </TouchableOpacity>
         </View>
       ) : filteredGroups.length === 0 ? (
         <View style={styles.emptyContainer}>
@@ -300,5 +316,20 @@ const styles = StyleSheet.create({
   },
   listContent: {
     paddingTop: 8,
+  },
+  retryButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    marginTop: 12,
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+    borderRadius: 20,
+    backgroundColor: Colors.dark.accent,
+  },
+  retryButtonText: {
+    color: "#fff",
+    fontSize: 14,
+    fontFamily: "Inter_600SemiBold",
   },
 });

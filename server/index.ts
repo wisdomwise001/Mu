@@ -1,6 +1,8 @@
 import express from "express";
 import type { Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
+import { scrapeGeonodeProxies } from "./proxyScraper";
+import { reloadProxies } from "./proxyFetch";
 import * as fs from "fs";
 import * as path from "path";
 
@@ -225,6 +227,38 @@ function setupErrorHandler(app: express.Application) {
   });
 }
 
+const PROXY_REFRESH_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
+const PROXIES_PATH = path.join(process.cwd(), "data", "proxies.json");
+
+function getProxyFileAgeMs(): number {
+  try {
+    const stat = fs.statSync(PROXIES_PATH);
+    return Date.now() - stat.mtimeMs;
+  } catch {
+    return Infinity;
+  }
+}
+
+async function runProxyRefresh() {
+  log("[proxy-auto] Starting proxy refresh…");
+  try {
+    const result = await scrapeGeonodeProxies((msg) => {
+      log(`[proxy-auto] ${msg}`);
+    });
+    reloadProxies();
+    log(`[proxy-auto] Done — ${result.verified} verified proxies loaded.`);
+  } catch (err: any) {
+    log(`[proxy-auto] Refresh failed: ${err.message}`);
+  }
+}
+
+function scheduleProxyRefresh() {
+  setInterval(() => {
+    runProxyRefresh();
+  }, PROXY_REFRESH_INTERVAL_MS);
+  log(`[proxy-auto] Auto-refresh scheduled every ${PROXY_REFRESH_INTERVAL_MS / 60000} minutes.`);
+}
+
 (async () => {
   setupCors(app);
   setupBodyParsing(app);
@@ -245,6 +279,18 @@ function setupErrorHandler(app: express.Application) {
     },
     () => {
       log(`express server serving on port ${port}`);
+
+      // Refresh proxies on startup if stale (older than 15 minutes or missing)
+      const ageMs = getProxyFileAgeMs();
+      if (ageMs > PROXY_REFRESH_INTERVAL_MS) {
+        log(`[proxy-auto] Proxy list is ${Math.round(ageMs / 60000)}m old — refreshing now…`);
+        runProxyRefresh();
+      } else {
+        log(`[proxy-auto] Proxy list is fresh (${Math.round(ageMs / 60000)}m old) — skipping initial refresh.`);
+      }
+
+      // Schedule recurring refresh every 15 minutes
+      scheduleProxyRefresh();
     },
   );
 })();
