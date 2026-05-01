@@ -1772,13 +1772,47 @@ const SOFASCORE_HEADERS: Record<string, string> = {
   "Cache-Control": "no-cache",
 };
 
+// ─── SofaScore in-memory cache with request deduplication ────────────────────
+// Historical match data (lineups/stats/incidents) is immutable once finished,
+// so it can be cached for a long time. Team event lists and current event info
+// expire faster so the user sees fresh fixture data.
+type CacheEntry = { data: any; expiresAt: number };
+const sofaCache = new Map<string, CacheEntry>();
+const sofaInflight = new Map<string, Promise<any>>();
+
+function sofaCacheTtl(endpoint: string): number {
+  // Team event lists: 3 minutes (live updates matter)
+  if (endpoint.match(/\/team\/\d+\/events\/last\//)) return 3 * 60 * 1000;
+  // Current event info: 2 minutes
+  if (endpoint.match(/^\/event\/[^/]+$/)) return 2 * 60 * 1000;
+  // Historical lineups, stats, incidents for specific events: 30 minutes (immutable)
+  if (endpoint.match(/\/event\/\d+\/(lineups|statistics|incidents)/)) return 30 * 60 * 1000;
+  // Half-context, standings: 5 minutes
+  return 5 * 60 * 1000;
+}
+
 async function fetchSofaScore(endpoint: string) {
-  const url = `${SOFASCORE_API}${endpoint}`;
-  const res = await proxyFetch(url, { headers: SOFASCORE_HEADERS });
-  if (!res.ok) {
-    throw new Error(`SofaScore API error: ${res.status}`);
-  }
-  return res.json();
+  const now = Date.now();
+  const cached = sofaCache.get(endpoint);
+  if (cached && cached.expiresAt > now) return cached.data;
+
+  // Deduplicate concurrent requests for the same endpoint
+  const inflight = sofaInflight.get(endpoint);
+  if (inflight) return inflight;
+
+  const promise = (async () => {
+    const url = `${SOFASCORE_API}${endpoint}`;
+    const res = await proxyFetch(url, { headers: SOFASCORE_HEADERS });
+    if (!res.ok) {
+      throw new Error(`SofaScore API error: ${res.status}`);
+    }
+    const data = await res.json();
+    sofaCache.set(endpoint, { data, expiresAt: Date.now() + sofaCacheTtl(endpoint) });
+    return data;
+  })().finally(() => sofaInflight.delete(endpoint));
+
+  sofaInflight.set(endpoint, promise);
+  return promise;
 }
 
 async function fetchTeamLastEvents(teamId: number): Promise<any[]> {
