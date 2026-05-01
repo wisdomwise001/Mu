@@ -13,7 +13,8 @@ import {
   type TrainedOutcomeModel,
   type BucketPrediction,
 } from "./scoreOutcomeTrainer";
-import { proxyFetch } from "./proxyFetch";
+import { proxyFetch, reloadProxies } from "./proxyFetch";
+import { scrapeGeonodeProxies } from "./proxyScraper";
 
 let _openai: OpenAI | null = null;
 function getOpenAI(): OpenAI {
@@ -2215,7 +2216,49 @@ function computeCausalAnalysis(patterns: ScoringPatterns): CausalProfile {
   };
 }
 
+// ── Proxy scrape state ────────────────────────────────────────────────────────
+let proxyScrapeState: {
+  running: boolean;
+  progress: string;
+  error: string | null;
+  result: { added: number; total: number } | null;
+  lastRun: string | null;
+} = { running: false, progress: "", error: null, result: null, lastRun: null };
+
 export async function registerRoutes(app: Express): Promise<Server> {
+  // ─── Refresh proxy pool from Geonode ────────────────────────────────────
+  app.post("/api/admin/refresh-proxies", (_req: Request, res: Response) => {
+    if (proxyScrapeState.running) {
+      return res.status(409).json({ error: "Scrape already in progress", state: proxyScrapeState });
+    }
+    proxyScrapeState = { running: true, progress: "Starting…", error: null, result: null, lastRun: null };
+    res.json({ started: true });
+
+    (async () => {
+      try {
+        const result = await scrapeGeonodeProxies((msg) => {
+          proxyScrapeState.progress = msg;
+          console.log("[proxy-scraper]", msg);
+        });
+        proxyScrapeState.result = { added: result.added, total: result.total };
+        proxyScrapeState.progress = `Done — ${result.added} proxies saved`;
+        proxyScrapeState.lastRun = new Date().toISOString();
+        reloadProxies();
+        console.log(`[proxy-scraper] Reloaded pool with ${result.added} proxies`);
+      } catch (err: any) {
+        proxyScrapeState.error = err.message || String(err);
+        proxyScrapeState.progress = `Failed: ${proxyScrapeState.error}`;
+        console.error("[proxy-scraper] error:", proxyScrapeState.error);
+      } finally {
+        proxyScrapeState.running = false;
+      }
+    })();
+  });
+
+  app.get("/api/admin/refresh-proxies/status", (_req: Request, res: Response) => {
+    res.json(proxyScrapeState);
+  });
+
   app.get(
     "/api/sport/:sport/scheduled-events/:date",
     async (req: Request, res: Response) => {
@@ -5189,18 +5232,106 @@ Format with clear markdown headings (### for sections). Keep it punchy but thoro
       };
 
       const predictions = predictAllBuckets(row, models);
-      const top2 = predictions.slice(0, 2);
 
-      // Build a compact summary for display
-      const summary = top2.map((p) => ({
-        scoreline: p.label,
-        confidence: `${p.confidence.toFixed(1)}%`,
-        rawGoalSum: p.rawSum,
-        rawGoalDiff: p.rawDiff,
-        exactHit: p.isExactHit,
-        modelAccuracy: `${(p.trainAccuracy * 100).toFixed(1)}%`,
-        modelFpRate: `${(p.fpRate * 100).toFixed(1)}%`,
-      }));
+      // ── Fetch xG engine result probabilities for winner split ─────────────
+      let homeWinProb = 0.34;
+      let drawProb = 0.33;
+      let awayWinProb = 0.33;
+      try {
+        const xgUrl = `${baseUrl}/api/engine/predict/${eventId}?homeTeamId=${homeTeamId}&awayTeamId=${awayTeamId}`;
+        const xgRes = await fetch(xgUrl, { signal: AbortSignal.timeout(15000) });
+        if (xgRes.ok) {
+          const xg: any = await xgRes.json();
+          const rp = xg?.prediction?.derived?.resultProbabilities;
+          if (rp) {
+            homeWinProb = rp.home ?? homeWinProb;
+            drawProb    = rp.draw ?? drawProb;
+            awayWinProb = rp.away ?? awayWinProb;
+          }
+        }
+      } catch { /* use uniform defaults */ }
+
+      // ── Split each bucket prediction into per-scoreline entries ───────────
+      // Draw buckets (scores like [[1,1]]) stay as one entry.
+      // Asymmetric buckets (scores like [[2,1],[1,2]]) are split into:
+      //   home-win entry  (confidence × homeWinProb / (homeWinProb + awayWinProb))
+      //   away-win entry  (confidence × awayWinProb / (homeWinProb + awayWinProb))
+      interface ScoреlinePrediction {
+        scoreline: string;
+        homeGoals: number;
+        awayGoals: number;
+        outcome: "Home Win" | "Away Win" | "Draw";
+        outcomeConfidence: number;
+        bucketConfidence: number;
+        bucketId: string;
+        isExactHit: boolean;
+        trainAccuracy: number;
+        fpRate: number;
+        rawSum: number;
+        rawDiff: number;
+      }
+
+      const scorelines: ScoреlinePrediction[] = [];
+      for (const p of predictions) {
+        const isDraw = p.scores.length === 1 && p.scores[0][0] === p.scores[0][1];
+        if (isDraw) {
+          const [h, a] = p.scores[0];
+          scorelines.push({
+            scoreline: `${h}-${a}`,
+            homeGoals: h,
+            awayGoals: a,
+            outcome: "Draw",
+            outcomeConfidence: Math.round(p.confidence * drawProb * 10) / 10,
+            bucketConfidence: p.confidence,
+            bucketId: p.bucketId,
+            isExactHit: p.isExactHit,
+            trainAccuracy: p.trainAccuracy,
+            fpRate: p.fpRate,
+            rawSum: p.rawSum,
+            rawDiff: p.rawDiff,
+          });
+        } else {
+          // Split into home-win + away-win using xG direction probabilities
+          const dirTotal = homeWinProb + awayWinProb || 1;
+          const homeShare = homeWinProb / dirTotal;
+          const awayShare = awayWinProb / dirTotal;
+          // Pick the scoreline where homeGoals > awayGoals for home win, and vice versa
+          const homeWinScore = p.scores.find(([h, a]) => h > a) ?? p.scores[0];
+          const awayWinScore = p.scores.find(([h, a]) => a > h) ?? p.scores[1] ?? p.scores[0];
+          scorelines.push({
+            scoreline: `${homeWinScore[0]}-${homeWinScore[1]}`,
+            homeGoals: homeWinScore[0],
+            awayGoals: homeWinScore[1],
+            outcome: "Home Win",
+            outcomeConfidence: Math.round(p.confidence * homeShare * 10) / 10,
+            bucketConfidence: p.confidence,
+            bucketId: p.bucketId,
+            isExactHit: p.isExactHit && p.roundedSum === homeWinScore[0] + homeWinScore[1],
+            trainAccuracy: p.trainAccuracy,
+            fpRate: p.fpRate,
+            rawSum: p.rawSum,
+            rawDiff: p.rawDiff,
+          });
+          scorelines.push({
+            scoreline: `${awayWinScore[0]}-${awayWinScore[1]}`,
+            homeGoals: awayWinScore[0],
+            awayGoals: awayWinScore[1],
+            outcome: "Away Win",
+            outcomeConfidence: Math.round(p.confidence * awayShare * 10) / 10,
+            bucketConfidence: p.confidence,
+            bucketId: p.bucketId,
+            isExactHit: p.isExactHit && p.roundedSum === awayWinScore[0] + awayWinScore[1],
+            trainAccuracy: p.trainAccuracy,
+            fpRate: p.fpRate,
+            rawSum: p.rawSum,
+            rawDiff: p.rawDiff,
+          });
+        }
+      }
+
+      // Sort by outcomeConfidence descending
+      scorelines.sort((a, b) => b.outcomeConfidence - a.outcomeConfidence);
+      const top2Scorelines = scorelines.slice(0, 2);
 
       res.json({
         eventId,
@@ -5208,9 +5339,11 @@ Format with clear markdown headings (### for sections). Keep it punchy but thoro
         awayTeamId,
         source: "live_simulation",
         modelsUsed: models.length,
-        top2,
-        summary,
+        resultProbabilities: { homeWinProb, drawProb, awayWinProb },
+        top2: predictions.slice(0, 2),
+        top2Scorelines,
         all: predictions,
+        allScorelinesRanked: scorelines,
       });
     } catch (err: any) {
       console.error("[outcome-predict] error:", err.message);

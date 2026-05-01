@@ -26,39 +26,46 @@ interface BucketPrediction {
   fpRate: number;
 }
 
-interface OutcomePredictResponse {
-  eventId: number;
-  homeTeamId: number;
-  awayTeamId: number;
-  source: "live_simulation" | "database_fallback";
-  modelsUsed: number;
-  top2: BucketPrediction[];
-  all: BucketPrediction[];
-  summary: {
-    scoreline: string;
-    confidence: string;
-    rawGoalSum: number;
-    rawGoalDiff: number;
-    exactHit: boolean;
-    modelAccuracy: string;
-    modelFpRate: string;
-  }[];
+interface ScoреlinePrediction {
+  scoreline: string;
+  homeGoals: number;
+  awayGoals: number;
+  outcome: "Home Win" | "Away Win" | "Draw";
+  outcomeConfidence: number;
+  bucketConfidence: number;
+  bucketId: string;
+  isExactHit: boolean;
+  trainAccuracy: number;
+  fpRate: number;
+  rawSum: number;
+  rawDiff: number;
 }
 
-const RANK_COLORS = ["#3D7BF4", "#f59e0b"];
-const RANK_LABELS = ["#1 Most Likely", "#2 Runner-Up"];
+interface OutcomePredictResponse {
+  eventId: number;
+  source: "live_simulation" | "database_fallback";
+  modelsUsed: number;
+  resultProbabilities: { homeWinProb: number; drawProb: number; awayWinProb: number };
+  top2: BucketPrediction[];
+  top2Scorelines: ScoреlinePrediction[];
+  all: BucketPrediction[];
+  allScorelinesRanked: ScoреlinePrediction[];
+}
+
+const OUTCOME_META: Record<
+  "Home Win" | "Away Win" | "Draw",
+  { icon: string; color: string }
+> = {
+  "Home Win": { icon: "trophy",           color: "#3D7BF4" },
+  "Away Win": { icon: "trophy-outline",   color: "#f59e0b" },
+  "Draw":     { icon: "remove-circle",    color: "#8C8D96" },
+};
 
 function AnimatedBar({ pct, color, delay }: { pct: number; color: string; delay: number }) {
   const anim = useRef(new Animated.Value(0)).current;
   useEffect(() => {
-    Animated.timing(anim, {
-      toValue: pct,
-      duration: 700,
-      delay,
-      useNativeDriver: false,
-    }).start();
+    Animated.timing(anim, { toValue: pct, duration: 700, delay, useNativeDriver: false }).start();
   }, [pct, delay]);
-
   const width = anim.interpolate({ inputRange: [0, 100], outputRange: ["0%", "100%"] });
   return (
     <View style={styles.barTrack}>
@@ -67,62 +74,116 @@ function AnimatedBar({ pct, color, delay }: { pct: number; color: string; delay:
   );
 }
 
-function TopCard({
+function WinProbBar({
+  homeWinProb,
+  drawProb,
+  awayWinProb,
+  homeTeamName,
+  awayTeamName,
+}: {
+  homeWinProb: number;
+  drawProb: number;
+  awayWinProb: number;
+  homeTeamName: string;
+  awayTeamName: string;
+}) {
+  const homePct = Math.round(homeWinProb * 100);
+  const drawPct = Math.round(drawProb * 100);
+  const awayPct = Math.round(awayWinProb * 100);
+  return (
+    <View style={styles.winProbCard}>
+      <Text style={styles.winProbTitle}>Match Outcome Probability</Text>
+      <View style={styles.winProbTrack}>
+        <View style={[styles.winProbFill, { flex: homePct, backgroundColor: "#3D7BF4" }]} />
+        <View style={[styles.winProbFill, { flex: drawPct, backgroundColor: "#5C5D66" }]} />
+        <View style={[styles.winProbFill, { flex: awayPct, backgroundColor: "#f59e0b" }]} />
+      </View>
+      <View style={styles.winProbLabels}>
+        <View style={styles.winProbLabel}>
+          <View style={[styles.winProbDot, { backgroundColor: "#3D7BF4" }]} />
+          <Text style={styles.winProbTeam} numberOfLines={1}>{homeTeamName}</Text>
+          <Text style={[styles.winProbPct, { color: "#3D7BF4" }]}>{homePct}%</Text>
+        </View>
+        <View style={styles.winProbLabel}>
+          <View style={[styles.winProbDot, { backgroundColor: "#5C5D66" }]} />
+          <Text style={styles.winProbTeam}>Draw</Text>
+          <Text style={[styles.winProbPct, { color: "#8C8D96" }]}>{drawPct}%</Text>
+        </View>
+        <View style={styles.winProbLabel}>
+          <View style={[styles.winProbDot, { backgroundColor: "#f59e0b" }]} />
+          <Text style={styles.winProbTeam} numberOfLines={1}>{awayTeamName}</Text>
+          <Text style={[styles.winProbPct, { color: "#f59e0b" }]}>{awayPct}%</Text>
+        </View>
+      </View>
+    </View>
+  );
+}
+
+function TopScorelineCard({
   prediction,
   rank,
   homeTeamName,
   awayTeamName,
 }: {
-  prediction: BucketPrediction;
+  prediction: ScoреlinePrediction;
   rank: number;
   homeTeamName: string;
   awayTeamName: string;
 }) {
-  const color = RANK_COLORS[rank] ?? RANK_COLORS[1];
-  const rankLabel = RANK_LABELS[rank] ?? `#${rank + 1}`;
+  const meta = OUTCOME_META[prediction.outcome];
+  const rankColors = ["#3D7BF4", "#f59e0b"];
+  const color = rankColors[rank] ?? rankColors[1];
+
+  // Determine winner name for the outcome label
+  let winnerLabel = prediction.outcome;
+  if (prediction.outcome === "Home Win") winnerLabel = `${homeTeamName} Win`;
+  else if (prediction.outcome === "Away Win") winnerLabel = `${awayTeamName} Win`;
 
   return (
     <View style={[styles.topCard, { borderColor: color }]}>
+      {/* Rank + outcome badge row */}
       <View style={styles.topCardHeader}>
         <View style={[styles.rankBadge, { backgroundColor: color }]}>
-          <Text style={styles.rankBadgeText}>{rankLabel}</Text>
+          <Text style={styles.rankBadgeText}>#{rank + 1} Most Likely</Text>
+        </View>
+        <View style={styles.outcomeBadge}>
+          <Ionicons name={meta.icon as any} size={13} color={meta.color} />
+          <Text style={[styles.outcomeText, { color: meta.color }]}>{winnerLabel}</Text>
         </View>
         {prediction.isExactHit && (
-          <View style={styles.exactHitBadge}>
+          <View style={styles.exactBadge}>
             <Ionicons name="checkmark-circle" size={12} color="#4ade80" />
-            <Text style={styles.exactHitText}>Exact</Text>
+            <Text style={styles.exactText}>Exact</Text>
           </View>
         )}
       </View>
 
-      <Text style={[styles.scoreline, { color }]}>{prediction.label}</Text>
-
-      {prediction.scores.length > 0 && (
-        <View style={styles.scorePills}>
-          {prediction.scores.map(([h, a], i) => (
-            <View key={i} style={styles.scorePill}>
-              <Text style={styles.scorePillText}>
-                {homeTeamName} {h} – {a} {awayTeamName}
-              </Text>
-            </View>
-          ))}
+      {/* Scoreline */}
+      <View style={styles.scoreRow}>
+        <View style={styles.scoreTeamBlock}>
+          <Text style={[styles.teamName, prediction.outcome === "Home Win" && styles.teamNameWinner]}
+            numberOfLines={1}>{homeTeamName}</Text>
+          <Text style={[styles.scoreDigit, { color }]}>{prediction.homeGoals}</Text>
         </View>
-      )}
-
-      <View style={styles.confidenceRow}>
-        <Text style={[styles.confidenceValue, { color }]}>{prediction.confidence.toFixed(1)}%</Text>
-        <Text style={styles.confidenceLabel}>confidence</Text>
+        <Text style={styles.scoreSep}>–</Text>
+        <View style={styles.scoreTeamBlock}>
+          <Text style={[styles.scoreDigit, { color }]}>{prediction.awayGoals}</Text>
+          <Text style={[styles.teamName, styles.teamNameRight, prediction.outcome === "Away Win" && styles.teamNameWinner]}
+            numberOfLines={1}>{awayTeamName}</Text>
+        </View>
       </View>
 
-      <AnimatedBar pct={prediction.confidence} color={color} delay={rank * 150} />
+      {/* Confidence bar */}
+      <View style={styles.confidenceRow}>
+        <Text style={[styles.confidenceValue, { color }]}>{prediction.outcomeConfidence.toFixed(1)}%</Text>
+        <Text style={styles.confidenceLabel}>scoreline confidence</Text>
+      </View>
+      <AnimatedBar pct={Math.min(100, prediction.outcomeConfidence * 3)} color={color} delay={rank * 150} />
 
-      <View style={styles.modelMeta}>
-        <Text style={styles.metaItem}>
-          Model accuracy: {(prediction.trainAccuracy * 100).toFixed(1)}%
-        </Text>
-        <Text style={styles.metaItem}>
-          FP rate: {(prediction.fpRate * 100).toFixed(1)}%
-        </Text>
+      <View style={styles.metaRow}>
+        <Text style={styles.metaItem}>Bucket: {prediction.bucketId}</Text>
+        <Text style={styles.metaItem}>Model acc: {(prediction.trainAccuracy * 100).toFixed(1)}%</Text>
+        <Text style={styles.metaItem}>FP: {(prediction.fpRate * 100).toFixed(1)}%</Text>
       </View>
     </View>
   );
@@ -141,36 +202,43 @@ function MiniBar({ pct, color }: { pct: number; color: string }) {
   );
 }
 
-function AllBucketsSection({ predictions }: { predictions: BucketPrediction[] }) {
+function AllScorelinesSection({
+  predictions,
+  homeTeamName,
+  awayTeamName,
+}: {
+  predictions: ScoреlinePrediction[];
+  homeTeamName: string;
+  awayTeamName: string;
+}) {
   const [expanded, setExpanded] = useState(false);
   const rest = predictions.slice(2);
-  const shown = expanded ? rest : rest.slice(0, 5);
-  const maxConf = predictions[0]?.confidence || 1;
+  const shown = expanded ? rest : rest.slice(0, 6);
+  const maxConf = predictions[0]?.outcomeConfidence || 1;
 
   return (
     <View style={styles.section}>
-      <Text style={styles.sectionTitle}>All Buckets</Text>
+      <Text style={styles.sectionTitle}>All Scorelines Ranked</Text>
       {shown.map((p, i) => {
-        const relPct = Math.min(100, (p.confidence / maxConf) * 100);
-        const alpha = Math.max(0.3, p.confidence / maxConf);
-        const col = `rgba(140, 141, 150, ${alpha})`;
+        const meta = OUTCOME_META[p.outcome];
+        const relPct = Math.min(100, (p.outcomeConfidence / maxConf) * 100);
+        let winnerName = p.outcome === "Home Win" ? homeTeamName
+          : p.outcome === "Away Win" ? awayTeamName : "Draw";
         return (
-          <View key={p.bucketId} style={styles.miniRow}>
+          <View key={`${p.bucketId}-${p.outcome}`} style={styles.miniRow}>
             <Text style={styles.miniRank}>{i + 3}</Text>
-            <Text style={styles.miniLabel}>{p.label}</Text>
-            <MiniBar pct={relPct} color={col} />
-            <Text style={styles.miniConf}>{p.confidence.toFixed(1)}%</Text>
+            <Ionicons name={meta.icon as any} size={13} color={meta.color} style={{ width: 18 }} />
+            <Text style={styles.miniScore}>{p.scoreline}</Text>
+            <Text style={[styles.miniWinner, { color: meta.color }]} numberOfLines={1}>{winnerName}</Text>
+            <MiniBar pct={relPct} color={meta.color} />
+            <Text style={styles.miniConf}>{p.outcomeConfidence.toFixed(1)}%</Text>
           </View>
         );
       })}
-      {rest.length > 5 && (
+      {rest.length > 6 && (
         <TouchableOpacity style={styles.expandBtn} onPress={() => setExpanded(!expanded)}>
-          <Text style={styles.expandText}>{expanded ? "Show less" : `Show ${rest.length - 5} more`}</Text>
-          <Ionicons
-            name={expanded ? "chevron-up" : "chevron-down"}
-            size={14}
-            color={Colors.dark.accent}
-          />
+          <Text style={styles.expandText}>{expanded ? "Show less" : `Show ${rest.length - 6} more`}</Text>
+          <Ionicons name={expanded ? "chevron-up" : "chevron-down"} size={14} color={Colors.dark.accent} />
         </TouchableOpacity>
       )}
     </View>
@@ -253,28 +321,21 @@ export default function ScorePredictionTab({
     );
   }
 
-  const top2 = data.top2 ?? [];
-  const all = data.all ?? [];
+  const top2 = data.top2Scorelines ?? [];
+  const allRanked = data.allScorelinesRanked ?? [];
+  const rp = data.resultProbabilities;
 
   return (
-    <ScrollView
-      style={styles.scroll}
-      contentContainerStyle={styles.scrollContent}
-      showsVerticalScrollIndicator={false}
-    >
+    <ScrollView style={styles.scroll} contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
       {/* Header */}
       <View style={styles.headerRow}>
         <View style={{ flex: 1 }}>
           <Text style={styles.headerTitle}>Score Prediction</Text>
           <Text style={styles.headerSub}>
-            {data.modelsUsed} bucket model{data.modelsUsed !== 1 ? "s" : ""} · softmax confidence
+            {data.modelsUsed} bucket model{data.modelsUsed !== 1 ? "s" : ""} · xG-weighted winner split
           </Text>
         </View>
-        <TouchableOpacity
-          style={styles.refreshBtn}
-          onPress={() => refetch()}
-          disabled={isFetching}
-        >
+        <TouchableOpacity style={styles.refreshBtn} onPress={() => refetch()} disabled={isFetching}>
           <Ionicons name="refresh" size={16} color={Colors.dark.accent} />
         </TouchableOpacity>
       </View>
@@ -291,15 +352,26 @@ export default function ScorePredictionTab({
         </Text>
       </View>
 
-      {/* Top 2 cards */}
+      {/* Win probability bar */}
+      {rp && (
+        <WinProbBar
+          homeWinProb={rp.homeWinProb}
+          drawProb={rp.drawProb}
+          awayWinProb={rp.awayWinProb}
+          homeTeamName={homeTeamName}
+          awayTeamName={awayTeamName}
+        />
+      )}
+
+      {/* Top 2 winner-labelled scoreline cards */}
       {top2.length === 0 ? (
-        <View style={styles.center}>
+        <View style={[styles.center, { marginVertical: 24 }]}>
           <Text style={styles.emptyText}>No predictions returned.</Text>
         </View>
       ) : (
         top2.map((p, i) => (
-          <TopCard
-            key={p.bucketId}
+          <TopScorelineCard
+            key={`${p.bucketId}-${p.outcome}`}
             prediction={p}
             rank={i}
             homeTeamName={homeTeamName}
@@ -308,16 +380,21 @@ export default function ScorePredictionTab({
         ))
       )}
 
-      {/* All buckets list */}
-      {all.length > 2 && <AllBucketsSection predictions={all} />}
+      {/* All scorelines ranked list */}
+      {allRanked.length > 2 && (
+        <AllScorelinesSection
+          predictions={allRanked}
+          homeTeamName={homeTeamName}
+          awayTeamName={awayTeamName}
+        />
+      )}
 
-      {/* Footer note */}
+      {/* Footer */}
       <View style={styles.footer}>
         <Ionicons name="information-circle-outline" size={14} color={Colors.dark.textTertiary} />
         <Text style={styles.footerText}>
-          Confidence is softmax-normalised across all trained bucket models. Each model predicts
-          (goal_sum, goal_diff) — the closer its output to the bucket's target, the higher
-          its score.
+          Bucket models predict goal sum &amp; diff. Winner direction is split using the xG engine's
+          result probabilities. Confidence = bucket confidence × direction share.
         </Text>
       </View>
     </ScrollView>
@@ -326,7 +403,7 @@ export default function ScorePredictionTab({
 
 const styles = StyleSheet.create({
   scroll: { flex: 1, backgroundColor: Colors.dark.background },
-  scrollContent: { padding: 16, paddingBottom: 32 },
+  scrollContent: { padding: 16, paddingBottom: 40 },
 
   center: {
     flex: 1,
@@ -336,257 +413,75 @@ const styles = StyleSheet.create({
     gap: 12,
     backgroundColor: Colors.dark.background,
   },
-  emptyText: {
-    fontSize: 15,
-    color: Colors.dark.text,
-    textAlign: "center",
-    fontFamily: "Inter_600SemiBold",
-  },
-  emptySubText: {
-    fontSize: 13,
-    color: Colors.dark.textSecondary,
-    textAlign: "center",
-    lineHeight: 20,
-  },
-  loadingText: {
-    fontSize: 15,
-    color: Colors.dark.text,
-    fontFamily: "Inter_600SemiBold",
-    marginTop: 8,
-  },
-  loadingSubText: {
-    fontSize: 12,
-    color: Colors.dark.textSecondary,
-    textAlign: "center",
-    lineHeight: 18,
-  },
+  emptyText: { fontSize: 15, color: Colors.dark.text, textAlign: "center", fontFamily: "Inter_600SemiBold" },
+  emptySubText: { fontSize: 13, color: Colors.dark.textSecondary, textAlign: "center", lineHeight: 20 },
+  loadingText: { fontSize: 15, color: Colors.dark.text, fontFamily: "Inter_600SemiBold", marginTop: 8 },
+  loadingSubText: { fontSize: 12, color: Colors.dark.textSecondary, textAlign: "center", lineHeight: 18 },
 
-  headerRow: {
-    flexDirection: "row",
-    alignItems: "flex-start",
-    marginBottom: 8,
-  },
-  headerTitle: {
-    fontSize: 20,
-    color: Colors.dark.text,
-    fontFamily: "Inter_700Bold",
-  },
-  headerSub: {
-    fontSize: 12,
-    color: Colors.dark.textSecondary,
-    marginTop: 2,
-  },
-  refreshBtn: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: Colors.dark.surface,
-    alignItems: "center",
-    justifyContent: "center",
-  },
+  headerRow: { flexDirection: "row", alignItems: "flex-start", marginBottom: 8 },
+  headerTitle: { fontSize: 20, color: Colors.dark.text, fontFamily: "Inter_700Bold" },
+  headerSub: { fontSize: 12, color: Colors.dark.textSecondary, marginTop: 2 },
+  refreshBtn: { width: 36, height: 36, borderRadius: 18, backgroundColor: Colors.dark.surface, alignItems: "center", justifyContent: "center" },
 
-  sourceBadge: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 5,
-    marginBottom: 16,
-  },
-  sourceText: {
-    fontSize: 12,
-    color: Colors.dark.textSecondary,
-  },
+  sourceBadge: { flexDirection: "row", alignItems: "center", gap: 5, marginBottom: 14 },
+  sourceText: { fontSize: 12, color: Colors.dark.textSecondary },
 
-  topCard: {
-    backgroundColor: Colors.dark.card,
-    borderRadius: 14,
-    borderWidth: 1.5,
-    padding: 18,
-    marginBottom: 12,
-  },
-  topCardHeader: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    marginBottom: 10,
-  },
-  rankBadge: {
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 20,
-  },
-  rankBadgeText: {
-    fontSize: 11,
-    color: "#fff",
-    fontFamily: "Inter_700Bold",
-    textTransform: "uppercase",
-    letterSpacing: 0.5,
-  },
-  exactHitBadge: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 3,
-  },
-  exactHitText: {
-    fontSize: 11,
-    color: "#4ade80",
-    fontFamily: "Inter_600SemiBold",
-  },
+  // Win probability bar
+  winProbCard: { backgroundColor: Colors.dark.surface, borderRadius: 12, padding: 14, marginBottom: 14 },
+  winProbTitle: { fontSize: 12, color: Colors.dark.textSecondary, fontFamily: "Inter_600SemiBold", textTransform: "uppercase", letterSpacing: 0.7, marginBottom: 10 },
+  winProbTrack: { flexDirection: "row", height: 8, borderRadius: 4, overflow: "hidden", marginBottom: 10 },
+  winProbFill: { height: "100%" },
+  winProbLabels: { flexDirection: "row", justifyContent: "space-between" },
+  winProbLabel: { flexDirection: "row", alignItems: "center", gap: 5, flex: 1 },
+  winProbDot: { width: 8, height: 8, borderRadius: 4 },
+  winProbTeam: { fontSize: 11, color: Colors.dark.textSecondary, flex: 1 },
+  winProbPct: { fontSize: 13, fontFamily: "Inter_700Bold" },
 
-  scoreline: {
-    fontSize: 28,
-    fontFamily: "Inter_700Bold",
-    marginBottom: 10,
-    letterSpacing: -0.5,
-  },
+  // Top scoreline card
+  topCard: { backgroundColor: Colors.dark.card, borderRadius: 14, borderWidth: 1.5, padding: 18, marginBottom: 12 },
+  topCardHeader: { flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 14, flexWrap: "wrap" },
+  rankBadge: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 20 },
+  rankBadgeText: { fontSize: 11, color: "#fff", fontFamily: "Inter_700Bold", textTransform: "uppercase", letterSpacing: 0.5 },
+  outcomeBadge: { flexDirection: "row", alignItems: "center", gap: 4, backgroundColor: Colors.dark.surfaceSecondary, paddingHorizontal: 9, paddingVertical: 4, borderRadius: 20 },
+  outcomeText: { fontSize: 12, fontFamily: "Inter_600SemiBold" },
+  exactBadge: { flexDirection: "row", alignItems: "center", gap: 3 },
+  exactText: { fontSize: 11, color: "#4ade80", fontFamily: "Inter_600SemiBold" },
 
-  scorePills: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 6,
-    marginBottom: 14,
-  },
-  scorePill: {
-    backgroundColor: Colors.dark.surfaceSecondary,
-    borderRadius: 8,
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-  },
-  scorePillText: {
-    fontSize: 12,
-    color: Colors.dark.textSecondary,
-    fontFamily: "Inter_400Regular",
-  },
+  scoreRow: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 12, marginBottom: 16 },
+  scoreTeamBlock: { flex: 1, alignItems: "center", gap: 6 },
+  teamName: { fontSize: 13, color: Colors.dark.textSecondary, textAlign: "center" },
+  teamNameRight: { textAlign: "center" },
+  teamNameWinner: { color: Colors.dark.text, fontFamily: "Inter_700Bold" },
+  scoreDigit: { fontSize: 48, fontFamily: "Inter_700Bold", lineHeight: 52 },
+  scoreSep: { fontSize: 32, color: Colors.dark.textTertiary, fontFamily: "Inter_400Regular" },
 
-  confidenceRow: {
-    flexDirection: "row",
-    alignItems: "baseline",
-    gap: 6,
-    marginBottom: 8,
-  },
-  confidenceValue: {
-    fontSize: 32,
-    fontFamily: "Inter_700Bold",
-    lineHeight: 36,
-  },
-  confidenceLabel: {
-    fontSize: 14,
-    color: Colors.dark.textSecondary,
-    fontFamily: "Inter_400Regular",
-  },
+  confidenceRow: { flexDirection: "row", alignItems: "baseline", gap: 6, marginBottom: 8 },
+  confidenceValue: { fontSize: 28, fontFamily: "Inter_700Bold", lineHeight: 32 },
+  confidenceLabel: { fontSize: 13, color: Colors.dark.textSecondary },
 
-  barTrack: {
-    height: 8,
-    backgroundColor: Colors.dark.surfaceSecondary,
-    borderRadius: 4,
-    overflow: "hidden",
-    marginBottom: 12,
-  },
-  barFill: {
-    height: "100%",
-    borderRadius: 4,
-  },
+  barTrack: { height: 6, backgroundColor: Colors.dark.surfaceSecondary, borderRadius: 3, overflow: "hidden", marginBottom: 12 },
+  barFill: { height: "100%", borderRadius: 3 },
 
-  modelMeta: {
-    flexDirection: "row",
-    gap: 16,
-  },
-  metaItem: {
-    fontSize: 11,
-    color: Colors.dark.textTertiary,
-  },
+  metaRow: { flexDirection: "row", gap: 12, flexWrap: "wrap" },
+  metaItem: { fontSize: 11, color: Colors.dark.textTertiary },
 
-  section: {
-    backgroundColor: Colors.dark.surface,
-    borderRadius: 12,
-    padding: 14,
-    marginBottom: 12,
-  },
-  sectionTitle: {
-    fontSize: 13,
-    color: Colors.dark.textSecondary,
-    fontFamily: "Inter_600SemiBold",
-    textTransform: "uppercase",
-    letterSpacing: 0.8,
-    marginBottom: 12,
-  },
+  section: { backgroundColor: Colors.dark.surface, borderRadius: 12, padding: 14, marginBottom: 12 },
+  sectionTitle: { fontSize: 13, color: Colors.dark.textSecondary, fontFamily: "Inter_600SemiBold", textTransform: "uppercase", letterSpacing: 0.8, marginBottom: 12 },
 
-  miniRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    marginBottom: 8,
-  },
-  miniRank: {
-    width: 18,
-    fontSize: 11,
-    color: Colors.dark.textTertiary,
-    textAlign: "right",
-  },
-  miniLabel: {
-    width: 90,
-    fontSize: 12,
-    color: Colors.dark.text,
-    fontFamily: "Inter_600SemiBold",
-  },
-  miniTrack: {
-    flex: 1,
-    height: 4,
-    backgroundColor: Colors.dark.surfaceSecondary,
-    borderRadius: 2,
-    overflow: "hidden",
-  },
-  miniFill: {
-    height: "100%",
-    borderRadius: 2,
-  },
-  miniConf: {
-    width: 40,
-    fontSize: 11,
-    color: Colors.dark.textSecondary,
-    textAlign: "right",
-  },
+  miniRow: { flexDirection: "row", alignItems: "center", gap: 6, marginBottom: 9 },
+  miniRank: { width: 18, fontSize: 11, color: Colors.dark.textTertiary, textAlign: "right" },
+  miniScore: { width: 36, fontSize: 13, color: Colors.dark.text, fontFamily: "Inter_700Bold" },
+  miniWinner: { width: 72, fontSize: 11, fontFamily: "Inter_600SemiBold" },
+  miniTrack: { flex: 1, height: 4, backgroundColor: Colors.dark.surfaceSecondary, borderRadius: 2, overflow: "hidden" },
+  miniFill: { height: "100%", borderRadius: 2 },
+  miniConf: { width: 40, fontSize: 11, color: Colors.dark.textSecondary, textAlign: "right" },
 
-  expandBtn: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 4,
-    paddingTop: 8,
-  },
-  expandText: {
-    fontSize: 13,
-    color: Colors.dark.accent,
-    fontFamily: "Inter_600SemiBold",
-  },
+  expandBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 4, paddingTop: 8 },
+  expandText: { fontSize: 13, color: Colors.dark.accent, fontFamily: "Inter_600SemiBold" },
 
-  retryBtn: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    backgroundColor: Colors.dark.surface,
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderRadius: 10,
-    marginTop: 4,
-  },
-  retryText: {
-    fontSize: 14,
-    color: Colors.dark.accent,
-    fontFamily: "Inter_600SemiBold",
-  },
+  retryBtn: { flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: Colors.dark.surface, paddingHorizontal: 16, paddingVertical: 10, borderRadius: 10 },
+  retryText: { fontSize: 14, color: Colors.dark.accent, fontFamily: "Inter_600SemiBold" },
 
-  footer: {
-    flexDirection: "row",
-    gap: 8,
-    padding: 12,
-    backgroundColor: Colors.dark.surface,
-    borderRadius: 10,
-    marginTop: 4,
-  },
-  footerText: {
-    flex: 1,
-    fontSize: 11,
-    color: Colors.dark.textTertiary,
-    lineHeight: 17,
-  },
+  footer: { flexDirection: "row", gap: 8, padding: 12, backgroundColor: Colors.dark.surface, borderRadius: 10, marginTop: 4 },
+  footerText: { flex: 1, fontSize: 11, color: Colors.dark.textTertiary, lineHeight: 17 },
 });

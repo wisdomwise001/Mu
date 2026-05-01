@@ -71,6 +71,15 @@ function loadProxies(): void {
   }
 }
 
+/** Call after writing a fresh proxies.json to hot-reload the pool without restarting. */
+export function reloadProxies(): void {
+  initialized = false;
+  allProxies = [];
+  workingProxies = [];
+  stickyProxy = null;
+  loadProxies();
+}
+
 function pickProxy(exclude: Set<ProxyState>): ProxyState | null {
   const candidates = allProxies.filter(
     (p) => !exclude.has(p) && p.failures < FAILURE_BLACKLIST_THRESHOLD
