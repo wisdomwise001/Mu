@@ -11,7 +11,6 @@ import {
 import { useQuery } from "@tanstack/react-query";
 import { Ionicons } from "@expo/vector-icons";
 import Colors from "@/constants/colors";
-import { getApiUrl } from "@/lib/query-client";
 
 interface BucketPrediction {
   bucketId: string;
@@ -195,24 +194,14 @@ export default function ScorePredictionTab({
 }: Props) {
   const canFetch = !!homeTeamId && !!awayTeamId;
 
-  const params = new URLSearchParams();
-  if (homeTeamId) params.set("homeTeamId", String(homeTeamId));
-  if (awayTeamId) params.set("awayTeamId", String(awayTeamId));
+  const queryParts: string[] = [];
+  if (homeTeamId) queryParts.push(`homeTeamId=${homeTeamId}`);
+  if (awayTeamId) queryParts.push(`awayTeamId=${awayTeamId}`);
+  const queryUrl = `/api/engine/outcome-predict/${eventId}${queryParts.length ? `?${queryParts.join("&")}` : ""}`;
 
   const { data, isLoading, isError, error, refetch, isFetching } =
     useQuery<OutcomePredictResponse>({
-      queryKey: ["/api/engine/outcome-predict", eventId, homeTeamId, awayTeamId],
-      queryFn: async () => {
-        const url = getApiUrl(
-          `/api/engine/outcome-predict/${eventId}?${params.toString()}`
-        );
-        const res = await fetch(url);
-        if (!res.ok) {
-          const body = await res.json().catch(() => ({}));
-          throw new Error(body.error || `HTTP ${res.status}`);
-        }
-        return res.json();
-      },
+      queryKey: [queryUrl],
       enabled: canFetch,
       staleTime: 5 * 60 * 1000,
       retry: false,
