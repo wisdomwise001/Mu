@@ -10,7 +10,8 @@ const PROXIES_PATH = path.join(process.cwd(), "data", "proxies.json");
 const REQUEST_TIMEOUT_MS = 8000;
 const DEAD_RETRY_AFTER_MS = 10 * 60 * 1000; // recycle dead proxies after 10 min
 const HEALTH_CHECK_INTERVAL_MS = 5 * 60 * 1000; // background health-check every 5 min
-const MAX_ATTEMPTS_PER_REQUEST = 6;
+const RACE_WIDTH = 15;  // proxies fired simultaneously per round
+const MAX_ROUNDS  = 4;  // rounds = up to RACE_WIDTH * MAX_ROUNDS total attempts
 
 // ── Scoring weights ───────────────────────────────────────────────────────────
 const W_LATENCY = 0.40;
@@ -298,14 +299,17 @@ function requestThroughAgent(
   });
 }
 
-// ── Main export: smart proxy fetch with weighted rotation ─────────────────────
+// ── Main export: parallel-racing proxy fetch ──────────────────────────────────
+// Each round fires RACE_WIDTH proxies simultaneously and resolves as soon as
+// the first one returns a usable response, so latency = fastest proxy in the
+// batch rather than the sum of sequential failures.
 export async function proxyFetch(
   url: string,
   init: RequestInit = {}
 ): Promise<SimpleResponse> {
   loadProxies();
 
-  // No proxies → direct fetch fallback
+  // No proxies at all → direct fetch fallback
   if (activePool.length === 0 && deadPool.length === 0) {
     const r = await fetch(url, init);
     const buf = Buffer.from(await r.arrayBuffer());
@@ -314,8 +318,8 @@ export async function proxyFetch(
       status: r.status,
       statusText: r.statusText,
       headers: r.headers,
-      text: async () => buf.toString("utf-8"),
-      json: async () => JSON.parse(buf.toString("utf-8")),
+      text:        async () => buf.toString("utf-8"),
+      json:        async () => JSON.parse(buf.toString("utf-8")),
       arrayBuffer: async () =>
         buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) as ArrayBuffer,
     };
@@ -323,40 +327,62 @@ export async function proxyFetch(
 
   const tried = new Set<ProxyState>();
 
-  for (let attempt = 0; attempt < MAX_ATTEMPTS_PER_REQUEST; attempt++) {
-    // Tier-1 first, then weighted pick from all active
-    let proxy: ProxyState | null = null;
-    const tier1 = activePool.filter((p) => p.tier === 1 && !tried.has(p));
-    if (tier1.length > 0) {
-      proxy = weightedPick(tier1, tried);
+  for (let round = 0; round < MAX_ROUNDS; round++) {
+    // Pick up to RACE_WIDTH fresh proxies for this round (Tier-1 preferred)
+    const batch: ProxyState[] = [];
+    for (let i = 0; i < RACE_WIDTH; i++) {
+      const tier1 = activePool.filter((p) => p.tier === 1 && !tried.has(p));
+      const proxy = tier1.length > 0
+        ? weightedPick(tier1, tried)
+        : weightedPick(activePool, tried);
+      if (!proxy) break;
+      batch.push(proxy);
+      tried.add(proxy);
     }
-    if (!proxy) {
-      proxy = weightedPick(activePool, tried);
-    }
-    if (!proxy) break;
+    if (batch.length === 0) break;
 
-    tried.add(proxy);
+    // Fire all batch requests concurrently; resolve on first usable response
+    type Winner = { res: SimpleResponse; latencyMs: number; proxy: ProxyState };
+    const winner = await new Promise<Winner | null>((resolve) => {
+      let pending = batch.length;
+      let done = false;
 
-    try {
-      const timeout = proxy.tier === 1 ? 4000 : REQUEST_TIMEOUT_MS;
-      const { res, latencyMs } = await requestThroughAgent(url, init, proxy.agent, timeout);
+      const finish = (w: Winner | null) => {
+        if (done) return;
+        done = true;
+        resolve(w);
+      };
 
-      // Any real response (even 403/429) means the proxy is alive
-      if (res.status > 0) {
-        if (res.ok || res.status === 404) {
-          markGood(proxy, latencyMs);
-        } else if (res.status === 403 || res.status === 429) {
-          // Proxy works, target blocked this IP — still usable
-          markGood(proxy, latencyMs);
-        } else {
-          markBad(proxy);
-        }
-        return res;
+      for (const proxy of batch) {
+        const timeout = proxy.tier === 1 ? 3000 : 6000;
+        requestThroughAgent(url, init, proxy.agent, timeout)
+          .then(({ res, latencyMs }) => {
+            pending--;
+            if (res.status > 0) {
+              const usable = res.ok || res.status === 404 || res.status === 403 || res.status === 429;
+              if (usable && !done) {
+                finish({ res, latencyMs, proxy });
+              } else {
+                markBad(proxy);
+              }
+            } else {
+              markBad(proxy);
+            }
+            if (pending === 0) finish(null);
+          })
+          .catch(() => {
+            markBad(proxy);
+            pending--;
+            if (pending === 0) finish(null);
+          });
       }
-      markBad(proxy);
-    } catch {
-      markBad(proxy);
+    });
+
+    if (winner) {
+      markGood(winner.proxy, winner.latencyMs);
+      return winner.res;
     }
+    // All proxies in this batch failed — try next round
   }
 
   throw new Error(`proxyFetch: all ${tried.size} proxy attempts failed for ${url}`);

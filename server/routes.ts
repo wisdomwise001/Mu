@@ -1,5 +1,7 @@
 import type { Express, Request, Response } from "express";
 import { createServer, type Server } from "node:http";
+import fs from "node:fs";
+import path from "node:path";
 import OpenAI from "openai";
 import db from "./db";
 import engine, { extractFeatures, FEATURE_NAMES } from "./xgEngine";
@@ -1776,24 +1778,67 @@ const SOFASCORE_HEADERS: Record<string, string> = {
   "Cache-Control": "no-cache",
 };
 
-// ─── SofaScore in-memory cache with request deduplication ────────────────────
-// Historical match data (lineups/stats/incidents) is immutable once finished,
-// so it can be cached for a long time. Team event lists and current event info
-// expire faster so the user sees fresh fixture data.
+// ─── SofaScore cache: in-memory + disk persistence ───────────────────────────
+// TTLs are generous because fixture data rarely changes within a session.
+// Disk cache survives server restarts so cold-start is fast.
+const DISK_CACHE_DIR = path.join(process.cwd(), "data", "cache");
 type CacheEntry = { data: any; expiresAt: number };
 const sofaCache = new Map<string, CacheEntry>();
 const sofaInflight = new Map<string, Promise<any>>();
 
 function sofaCacheTtl(endpoint: string): number {
-  // Team event lists: 3 minutes (live updates matter)
-  if (endpoint.match(/\/team\/\d+\/events\/last\//)) return 3 * 60 * 1000;
-  // Current event info: 2 minutes
-  if (endpoint.match(/^\/event\/[^/]+$/)) return 2 * 60 * 1000;
-  // Historical lineups, stats, incidents for specific events: 30 minutes (immutable)
-  if (endpoint.match(/\/event\/\d+\/(lineups|statistics|incidents)/)) return 30 * 60 * 1000;
-  // Half-context, standings: 5 minutes
-  return 5 * 60 * 1000;
+  // Scheduled fixture lists: 30 min (barely change within a session)
+  if (endpoint.match(/\/sport\/[^/]+\/scheduled-events\//)) return 30 * 60 * 1000;
+  // Team event lists: 10 min
+  if (endpoint.match(/\/team\/\d+\/events\/last\//)) return 10 * 60 * 1000;
+  // Current event info: 5 min
+  if (endpoint.match(/^\/event\/[^/]+$/)) return 5 * 60 * 1000;
+  // Historical lineups/stats/incidents: immutable once finished — 24 h
+  if (endpoint.match(/\/event\/\d+\/(lineups|statistics|incidents)/)) return 24 * 60 * 60 * 1000;
+  // Everything else: 15 min
+  return 15 * 60 * 1000;
 }
+
+function diskCachePath(endpoint: string): string {
+  const safe = Buffer.from(endpoint).toString("base64url").replace(/[/\\]/g, "_");
+  return path.join(DISK_CACHE_DIR, `${safe}.json`);
+}
+
+function loadDiskCache(): void {
+  try {
+    fs.mkdirSync(DISK_CACHE_DIR, { recursive: true });
+    const files = fs.readdirSync(DISK_CACHE_DIR);
+    const now = Date.now();
+    let loaded = 0;
+    for (const f of files) {
+      if (!f.endsWith(".json")) continue;
+      try {
+        const raw = fs.readFileSync(path.join(DISK_CACHE_DIR, f), "utf-8");
+        const entry: { endpoint: string } & CacheEntry = JSON.parse(raw);
+        if (entry.expiresAt > now && entry.endpoint && entry.data !== undefined) {
+          sofaCache.set(entry.endpoint, { data: entry.data, expiresAt: entry.expiresAt });
+          loaded++;
+        } else {
+          fs.unlinkSync(path.join(DISK_CACHE_DIR, f));
+        }
+      } catch { /* corrupt file — skip */ }
+    }
+    if (loaded > 0) console.log(`[cache] Loaded ${loaded} entries from disk cache.`);
+  } catch (e) {
+    console.warn("[cache] Could not load disk cache:", e);
+  }
+}
+
+function saveDiskCache(endpoint: string, entry: CacheEntry): void {
+  try {
+    fs.mkdirSync(DISK_CACHE_DIR, { recursive: true });
+    const p = diskCachePath(endpoint);
+    fs.writeFileSync(p, JSON.stringify({ endpoint, ...entry }), "utf-8");
+  } catch { /* best-effort */ }
+}
+
+// Pre-warm disk cache at module load time
+loadDiskCache();
 
 async function fetchSofaScore(endpoint: string) {
   const now = Date.now();
@@ -1811,12 +1856,20 @@ async function fetchSofaScore(endpoint: string) {
       throw new Error(`SofaScore API error: ${res.status}`);
     }
     const data = await res.json();
-    sofaCache.set(endpoint, { data, expiresAt: Date.now() + sofaCacheTtl(endpoint) });
+    const entry: CacheEntry = { data, expiresAt: Date.now() + sofaCacheTtl(endpoint) };
+    sofaCache.set(endpoint, entry);
+    saveDiskCache(endpoint, entry);
     return data;
   })().finally(() => sofaInflight.delete(endpoint));
 
   sofaInflight.set(endpoint, promise);
   return promise;
+}
+
+// Fire-and-forget background prefetch — never throws, never blocks the caller
+function prefetchBackground(endpoint: string): void {
+  if (sofaCache.has(endpoint)) return; // already cached
+  fetchSofaScore(endpoint).catch(() => { /* ignore */ });
 }
 
 async function fetchTeamLastEvents(teamId: number): Promise<any[]> {
@@ -2268,10 +2321,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
     async (req: Request, res: Response) => {
       try {
         const { sport, date } = req.params;
-        const data = await fetchSofaScore(
-          `/sport/${sport}/scheduled-events/${date}`,
-        );
+        const data = await fetchSofaScore(`/sport/${sport}/scheduled-events/${date}`);
         res.json(data);
+        // Background-warm adjacent dates so navigation is instant
+        const d = new Date(date);
+        for (const offset of [-2, -1, 1, 2]) {
+          const adj = new Date(d);
+          adj.setDate(d.getDate() + offset);
+          const adjStr = adj.toISOString().slice(0, 10);
+          prefetchBackground(`/sport/${sport}/scheduled-events/${adjStr}`);
+        }
       } catch (error: any) {
         console.error("Error fetching scheduled events:", error.message);
         res.status(500).json({ error: error.message });
