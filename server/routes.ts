@@ -8,7 +8,10 @@ import {
   SCORE_BUCKETS,
   classifyBucket,
   trainBucket,
+  loadAllBucketModels,
+  predictAllBuckets,
   type TrainedOutcomeModel,
+  type BucketPrediction,
 } from "./scoreOutcomeTrainer";
 import { proxyFetch } from "./proxyFetch";
 
@@ -5026,6 +5029,193 @@ Format with clear markdown headings (### for sections). Keep it punchy but thoro
   app.delete("/api/engine/outcome-model/:bucket", (req: Request, res: Response) => {
     const r = db.prepare("DELETE FROM engine_outcome_models WHERE bucket = ?").run(req.params.bucket);
     res.json({ deleted: r.changes });
+  });
+
+  // ─── Outcome bucket prediction: run all trained bucket models on a match ──
+  // Returns the top 2 most likely scorelines with confidence %.
+  // The feature vector is built exactly as during training (same column names).
+  // Query params: homeTeamId, awayTeamId (required for upcoming matches).
+  app.get("/api/engine/outcome-predict/:eventId", async (req: Request, res: Response) => {
+    try {
+      const models = loadAllBucketModels();
+      if (models.length === 0) {
+        return res.status(400).json({
+          error: "No bucket models trained yet. Train at least one bucket from the Engine tab first.",
+        });
+      }
+
+      const eventId = Number(req.params.eventId);
+      const dbRow: any = db.prepare("SELECT * FROM match_simulations WHERE event_id = ?").get(eventId);
+
+      const homeTeamId = Number(req.query.homeTeamId) || dbRow?.home_team_id;
+      const awayTeamId = Number(req.query.awayTeamId) || dbRow?.away_team_id;
+
+      if (!homeTeamId || !awayTeamId) {
+        return res.status(400).json({ error: "homeTeamId and awayTeamId are required (or store the match via bulk upload first)." });
+      }
+
+      // Fetch fresh simulation data — same call that training uses
+      const serverPort = process.env.PORT || 5000;
+      const baseUrl = `http://localhost:${serverPort}`;
+      const simRes = await fetch(
+        `${baseUrl}/api/event/${eventId}/player-simulation?homeTeamId=${homeTeamId}&awayTeamId=${awayTeamId}`,
+        { signal: AbortSignal.timeout(90000) }
+      );
+      if (!simRes.ok) {
+        if (dbRow) {
+          // Fall back to stored features if live fetch fails
+          const predictions = predictAllBuckets(dbRow, models);
+          return res.json({
+            eventId,
+            source: "database_fallback",
+            modelsUsed: models.length,
+            top2: predictions.slice(0, 2),
+            all: predictions,
+          });
+        }
+        return res.status(502).json({ error: "Could not fetch match data and no stored row found." });
+      }
+
+      const sim: any = await simRes.json();
+      const h = sim.home;
+      const a = sim.away;
+      const hStats   = h?.teamMatchStats?.all;
+      const hStats1h = h?.teamMatchStats?.firstHalf;
+      const hStats2h = h?.teamMatchStats?.secondHalf;
+      const aStats   = a?.teamMatchStats?.all;
+      const aStats1h = a?.teamMatchStats?.firstHalf;
+      const aStats2h = a?.teamMatchStats?.secondHalf;
+      const hPhase   = h?.phaseStrengths;
+      const aPhase   = a?.phaseStrengths;
+      const hForm    = h?.formSummary;
+      const aForm    = a?.formSummary;
+
+      // Fetch half-context for ctx_ features
+      let ctx: any = {};
+      try {
+        const ctxRes = await fetch(`${baseUrl}/api/event/${eventId}/half-context`, { signal: AbortSignal.timeout(30000) });
+        if (ctxRes.ok) ctx = await ctxRes.json();
+      } catch { /* ctx stays empty — trainer handles missing ctx with 0 */ }
+
+      // Build feature row matching TRAINER_FEATURES column names exactly
+      const row: Record<string, any> = {
+        event_id: eventId,
+        home_team_id: homeTeamId,
+        away_team_id: awayTeamId,
+
+        // ── Home full-match ───────────────────────────────────────────────────
+        home_avg_xg:               hStats?.avgXg               ?? null,
+        home_avg_goals_scored:     hStats?.avgGoalsScored       ?? null,
+        home_avg_goals_conceded:   hStats?.avgGoalsConceded     ?? null,
+        home_avg_big_chances:      hStats?.avgBigChances        ?? null,
+        home_avg_total_shots:      hStats?.avgTotalShots        ?? null,
+        home_avg_shots_on_target:  hStats?.avgShotsOnTarget     ?? null,
+        home_avg_possession:       hStats?.avgPossession        ?? null,
+
+        // ── Away full-match ───────────────────────────────────────────────────
+        away_avg_xg:               aStats?.avgXg               ?? null,
+        away_avg_goals_scored:     aStats?.avgGoalsScored       ?? null,
+        away_avg_goals_conceded:   aStats?.avgGoalsConceded     ?? null,
+        away_avg_big_chances:      aStats?.avgBigChances        ?? null,
+        away_avg_total_shots:      aStats?.avgTotalShots        ?? null,
+        away_avg_shots_on_target:  aStats?.avgShotsOnTarget     ?? null,
+        away_avg_possession:       aStats?.avgPossession        ?? null,
+
+        // ── Per-half home ─────────────────────────────────────────────────────
+        home_h1_avg_goals_scored:  hStats1h?.avgGoalsScored     ?? null,
+        home_h1_avg_xg:            hStats1h?.avgXg              ?? null,
+        home_h1_avg_total_shots:   hStats1h?.avgTotalShots      ?? null,
+        home_h2_avg_goals_scored:  hStats2h?.avgGoalsScored     ?? null,
+        home_h2_avg_xg:            hStats2h?.avgXg              ?? null,
+        home_h2_avg_total_shots:   hStats2h?.avgTotalShots      ?? null,
+
+        // ── Per-half away ─────────────────────────────────────────────────────
+        away_h1_avg_goals_scored:  aStats1h?.avgGoalsScored     ?? null,
+        away_h1_avg_xg:            aStats1h?.avgXg              ?? null,
+        away_h1_avg_total_shots:   aStats1h?.avgTotalShots      ?? null,
+        away_h2_avg_goals_scored:  aStats2h?.avgGoalsScored     ?? null,
+        away_h2_avg_xg:            aStats2h?.avgXg              ?? null,
+        away_h2_avg_total_shots:   aStats2h?.avgTotalShots      ?? null,
+
+        // ── Form & strength ───────────────────────────────────────────────────
+        home_form_strength:        h?.formStrength              ?? null,
+        home_scoring_strength:     h?.scoringStrength           ?? null,
+        home_defending_strength:   h?.defendingStrength         ?? null,
+        home_form_points:          hForm?.formPoints            ?? null,
+        home_clean_sheets:         hForm?.cleanSheets           ?? null,
+
+        away_form_strength:        a?.formStrength              ?? null,
+        away_scoring_strength:     a?.scoringStrength           ?? null,
+        away_defending_strength:   a?.defendingStrength         ?? null,
+        away_form_points:          aForm?.formPoints            ?? null,
+        away_clean_sheets:         aForm?.cleanSheets           ?? null,
+
+        // ── Role strengths ────────────────────────────────────────────────────
+        home_phase_attack:         hPhase?.attackStrength       ?? null,
+        home_phase_defensive:      hPhase?.defensiveStrength    ?? null,
+        away_phase_attack:         aPhase?.attackStrength       ?? null,
+        away_phase_defensive:      aPhase?.defensiveStrength    ?? null,
+
+        // ── Injury impact ─────────────────────────────────────────────────────
+        home_injury_impact:        h?.injuryImpact              ?? 0,
+        away_injury_impact:        a?.injuryImpact              ?? 0,
+
+        // ── Context features from half-context endpoint ───────────────────────
+        ctx_is_knockout:           ctx.isKnockout               ?? 0,
+        ctx_is_second_leg:         ctx.isSecondLeg              ?? 0,
+        ctx_agg_lead_goals:        ctx.aggLeadGoals             ?? 0,
+        ctx_trailing_needs_goals:  ctx.trailingNeedsGoals       ?? 0,
+        ctx_home_motivation:       ctx.homeMotivation           ?? 0,
+        ctx_away_motivation:       ctx.awayMotivation           ?? 0,
+        ctx_motivation_asymmetry:  ctx.motivationAsymmetry      ?? 0,
+        ctx_home_fatigue_index:    ctx.homeFatigueIndex         ?? 0,
+        ctx_away_fatigue_index:    ctx.awayFatigueIndex         ?? 0,
+        ctx_fatigue_asymmetry:     ctx.fatigueAsymmetry         ?? 0,
+        ctx_home_avg_first_sub:    ctx.homeAvgFirstSub          ?? 0,
+        ctx_away_avg_first_sub:    ctx.awayAvgFirstSub          ?? 0,
+        ctx_home_late_subs_rate:   ctx.homeLateSubsRate         ?? 0,
+        ctx_away_late_subs_rate:   ctx.awayLateSubsRate         ?? 0,
+        ctx_home_conservative_coach: ctx.homeConservativeCoach  ?? 0,
+        ctx_away_conservative_coach: ctx.awayConservativeCoach  ?? 0,
+        ctx_style_clash_weight:    ctx.styleClashWeight         ?? 0,
+        ctx_odds_home_win:         ctx.oddsHomeWin              ?? 0,
+        ctx_odds_draw:             ctx.oddsDraw                 ?? 0,
+        ctx_odds_away_win:         ctx.oddsAwayWin              ?? 0,
+        ctx_odds_gap:              ctx.oddsGap                  ?? 0,
+        ctx_stage_modifier:        ctx.stageModifier            ?? 0,
+        ctx_signal_first_weight:   ctx.signalFirstWeight        ?? 0,
+        ctx_signal_second_weight:  ctx.signalSecondWeight       ?? 0,
+        ctx_signal_draw_weight:    ctx.signalDrawWeight         ?? 0,
+      };
+
+      const predictions = predictAllBuckets(row, models);
+      const top2 = predictions.slice(0, 2);
+
+      // Build a compact summary for display
+      const summary = top2.map((p) => ({
+        scoreline: p.label,
+        confidence: `${p.confidence.toFixed(1)}%`,
+        rawGoalSum: p.rawSum,
+        rawGoalDiff: p.rawDiff,
+        exactHit: p.isExactHit,
+        modelAccuracy: `${(p.trainAccuracy * 100).toFixed(1)}%`,
+        modelFpRate: `${(p.fpRate * 100).toFixed(1)}%`,
+      }));
+
+      res.json({
+        eventId,
+        homeTeamId,
+        awayTeamId,
+        source: "live_simulation",
+        modelsUsed: models.length,
+        top2,
+        summary,
+        all: predictions,
+      });
+    } catch (err: any) {
+      console.error("[outcome-predict] error:", err.message);
+      res.status(500).json({ error: err.message || "Prediction failed" });
+    }
   });
 
   app.get("/api/engine/predict/:eventId", async (req: Request, res: Response) => {

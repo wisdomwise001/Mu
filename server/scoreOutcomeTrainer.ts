@@ -154,6 +154,10 @@ export interface TrainOptions {
   negPenalty?: number;
   margin?: number;     // distance from target that counts as "near"
   maxNegSamples?: number; // cap negatives to keep training fast
+  /** How much extra weight to give confusable negatives (sum/diff near target).
+   *  Higher = the model is forced to draw harder boundaries around similar scores.
+   *  Default 2.0. Range 0–5. */
+  confusableFocus?: number;
   onProgress?: (pct: number, msg: string) => void;
 }
 
@@ -192,6 +196,10 @@ export async function trainBucket(opts: TrainOptions): Promise<TrainedOutcomeMod
   // Lower negPenalty → more positives hit but more false positives.
   const negPenalty = opts.negPenalty ?? 1.2;
   const margin = opts.margin ?? 0.5;
+  // confusableFocus: boosts gradient weight for negatives whose actual score
+  // is close to the target bucket (similar sum OR similar diff). These are
+  // the "hard negatives" the model must learn to discriminate from.
+  const confusableFocus = opts.confusableFocus ?? 2.0;
   const progress = opts.onProgress ?? (() => {});
 
   progress(2, "Loading positive samples from database...");
@@ -212,7 +220,13 @@ export async function trainBucket(opts: TrainOptions): Promise<TrainedOutcomeMod
 
   progress(8, `Found ${positiveRows.length} positive samples. Loading negatives...`);
 
-  // Pull negatives — random sample from non-bucket matches
+  // Pull negatives — all non-bucket matches from the database.
+  // We split them into two groups:
+  //   confusable  — scores whose (sum OR diff) is within ±1 of the target.
+  //                 These are the "hard negatives" the model must learn to
+  //                 separate from the bucket (e.g. 2-1 vs 2-0 when training 2-1/1-2).
+  //   easy        — all other non-bucket matches.
+  // We always include ALL confusable negatives, then pad with random easy ones.
   const allOther: any[] = db.prepare(`
     SELECT * FROM match_simulations
     WHERE home_goals IS NOT NULL AND away_goals IS NOT NULL
@@ -223,16 +237,41 @@ export async function trainBucket(opts: TrainOptions): Promise<TrainedOutcomeMod
     const a = Number(r.away_goals);
     return !bucket.scores.some(([sh, sa]) => sh === h && sa === a);
   });
-  // Shuffle then cap. Use 3× positive count so gradient magnitudes are
-  // comparable. opts.maxNegSamples lets the API override.
-  for (let i = negativeRows.length - 1; i > 0; i--) {
+
+  const confusableNegs: typeof negativeRows = [];
+  const easyNegs: typeof negativeRows = [];
+  for (const r of negativeRows) {
+    const h = Number(r.home_goals), a = Number(r.away_goals);
+    const s = h + a, d = Math.abs(h - a);
+    const isConfusable =
+      Math.abs(s - bucket.sum) <= 1 || Math.abs(d - bucket.absDiff) <= 1;
+    if (isConfusable) confusableNegs.push(r);
+    else easyNegs.push(r);
+  }
+  // Shuffle easy negatives
+  for (let i = easyNegs.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
-    [negativeRows[i], negativeRows[j]] = [negativeRows[j], negativeRows[i]];
+    [easyNegs[i], easyNegs[j]] = [easyNegs[j], easyNegs[i]];
   }
   const maxNegSamples = opts.maxNegSamples ?? Math.min(2000, Math.max(100, positiveRows.length * 3));
-  const negSampled = negativeRows.slice(0, maxNegSamples);
+  // Fill quota: all confusables first, then easy ones
+  const negSampled = [
+    ...confusableNegs,
+    ...easyNegs.slice(0, Math.max(0, maxNegSamples - confusableNegs.length)),
+  ];
 
-  progress(15, `Sampled ${negSampled.length} negative samples. Building feature matrix...`);
+  // Compute per-negative similarity weight (how "confusable" each one is).
+  // A negative that is only 1 sum/diff step away from the target gets a
+  // weight of up to (1 + confusableFocus); distant negatives get weight ≈ 1.
+  const negSimWeights = negSampled.map((r: any) => {
+    const h = Number(r.home_goals), a = Number(r.away_goals);
+    const s = h + a, d = Math.abs(h - a);
+    const dSum = Math.abs(s - bucket.sum);
+    const dDiff = Math.abs(d - bucket.absDiff);
+    return 1 + confusableFocus * Math.exp(-dSum - dDiff);
+  });
+
+  progress(15, `Sampled ${negSampled.length} negatives (${confusableNegs.length} confusable). Building feature matrix...`);
 
   // Build feature matrices
   const Xpos = positiveRows.map(buildFeatureVector);
@@ -295,8 +334,13 @@ export async function trainBucket(opts: TrainOptions): Promise<TrainedOutcomeMod
     // Use a narrow Gaussian bump so the penalty is essentially zero outside
     // the rounding box, and average over negatives so positives and negatives
     // contribute equal-magnitude gradients.
+    // Each negative is additionally scaled by its similarity weight so that
+    // confusable negatives (scores 1 step away) push much harder than easy ones.
     const sigma = 0.35; // narrow — bump≈0 once |d|>0.7
     const nNeg = Math.max(1, XnegN.length);
+    // Pre-compute total weight for normalisation so the overall magnitude
+    // stays comparable regardless of how many confusable negatives exist.
+    const totalSimWeight = negSimWeights.reduce((s, w) => s + w, 0) || nNeg;
     for (let i = 0; i < XnegN.length; i++) {
       const x = XnegN[i];
       const fs = dot(wSum, x) + bSum;
@@ -306,9 +350,12 @@ export async function trainBucket(opts: TrainOptions): Promise<TrainedOutcomeMod
       const bumpS = Math.exp(-(dS * dS) / (sigma * sigma));
       const bumpD = Math.exp(-(dD * dD) / (sigma * sigma));
       const penalty = bumpS * bumpD;
-      lossNeg += penalty;
+      // Scale loss contribution by similarity weight (confusable = more pressure)
+      const simW = negSimWeights[i];
+      lossNeg += penalty * simW;
       // ∂penalty/∂fs = bumpD · bumpS · (-2·dS / σ²)
-      const w = negPenalty / nNeg;
+      // Divide by totalSimWeight to keep overall gradient magnitude stable
+      const w = negPenalty * simW / totalSimWeight;
       const dFs = w * -2 * dS / (sigma * sigma) * penalty;
       const dFd = w * -2 * dD / (sigma * sigma) * penalty;
       for (let j = 0; j < D; j++) {
@@ -325,7 +372,7 @@ export async function trainBucket(opts: TrainOptions): Promise<TrainedOutcomeMod
       gWD[j] += 2 * l2 * wDiff[j];
     }
 
-    const loss = (lossPos / nPos) + (negPenalty * lossNeg / nNeg);
+    const loss = (lossPos / nPos) + (negPenalty * lossNeg / totalSimWeight);
 
     // Adam update
     const t = epoch;
@@ -475,7 +522,122 @@ export function formatFormula(
   return `${sumLine}\n\n${diffLine}\n\n${verdictLine}\n\n(Top 12 features by |weight| shown; full vector saved to DB. Coefficients are in raw feature units — plug stats in directly.)`;
 }
 
-// ── Predict helper (used by /api/engine/outcome-predict if ever wired in) ────
+// ── Load all trained bucket models from DB ───────────────────────────────────
+export interface LoadedBucketModel {
+  bucketId: string;
+  label: string;
+  targetSum: number;
+  targetDiff: number;
+  weightsSum: number[];
+  weightsDiff: number[];
+  biasSum: number;
+  biasDiff: number;
+  normMean: number[];
+  normStd: number[];
+  featureNames: string[];
+  trainAccuracy: number;
+  fpRate: number;
+}
+
+export function loadAllBucketModels(): LoadedBucketModel[] {
+  const rows: any[] = db.prepare(
+    `SELECT bucket, weights, train_accuracy, fp_rate FROM engine_outcome_models`
+  ).all();
+  const models: LoadedBucketModel[] = [];
+  for (const row of rows) {
+    const b = SCORE_BUCKETS.find((s) => s.id === row.bucket);
+    if (!b) continue;
+    try {
+      const w = JSON.parse(row.weights);
+      models.push({
+        bucketId: b.id,
+        label: b.label,
+        targetSum: b.sum,
+        targetDiff: b.absDiff,
+        weightsSum: w.weightsSum,
+        weightsDiff: w.weightsDiff,
+        biasSum: w.biasSum,
+        biasDiff: w.biasDiff,
+        normMean: w.normMean,
+        normStd: w.normStd,
+        featureNames: w.featureNames ?? TRAINER_FEATURES,
+        trainAccuracy: row.train_accuracy ?? 0,
+        fpRate: row.fp_rate ?? 1,
+      });
+    } catch {
+      // skip malformed model
+    }
+  }
+  return models;
+}
+
+// ── Predict across all trained buckets ───────────────────────────────────────
+// For each model, we run the feature vector through its linear formula and
+// measure how close the raw (sum, diff) output is to the bucket's target.
+// Confidence = exp(-distance²) — this gives 1.0 at an exact hit and decays
+// smoothly as the prediction drifts away. We then softmax-normalise across
+// all models so the confidences sum to 100%.
+export interface BucketPrediction {
+  bucketId: string;
+  label: string;
+  scores: [number, number][];
+  confidence: number;        // 0–100
+  rawSum: number;            // linear formula output (goal_sum)
+  rawDiff: number;           // linear formula output (goal_diff)
+  roundedSum: number;        // round(rawSum)
+  roundedDiff: number;       // round(rawDiff)
+  isExactHit: boolean;       // whether rounded values match this bucket's target
+  trainAccuracy: number;
+  fpRate: number;
+}
+
+export function predictAllBuckets(
+  row: Record<string, any>,
+  models: LoadedBucketModel[],
+): BucketPrediction[] {
+  if (models.length === 0) return [];
+
+  // Run each model
+  const raw = models.map((m) => {
+    const x = (m.featureNames ?? TRAINER_FEATURES).map((f) => asNumber(row[f]));
+    const xn = x.map((v, j) => (v - (m.normMean[j] ?? 0)) / (m.normStd[j] || 1));
+    const fs = dot(m.weightsSum, xn) + m.biasSum;
+    const fd = dot(m.weightsDiff, xn) + m.biasDiff;
+    const roundedSum = Math.round(fs);
+    const roundedDiff = Math.round(fd);
+    const isExactHit = roundedSum === m.targetSum && roundedDiff === m.targetDiff;
+
+    // Distance from this model's own prediction to its target (sum, diff space).
+    // A model that predicts exactly (3, 1) for a 2-1/1-2 bucket gets distance=0.
+    const dist = Math.sqrt((fs - m.targetSum) ** 2 + (fd - m.targetDiff) ** 2);
+    // Sharper decay (denominator 0.5) so only predictions very close to target score high.
+    const rawScore = Math.exp(-(dist * dist) / 0.5);
+    return { m, fs, fd, roundedSum, roundedDiff, isExactHit, rawScore };
+  });
+
+  // Softmax-normalise raw scores → confidence percentages
+  const totalScore = raw.reduce((s, r) => s + r.rawScore, 0) || 1;
+
+  const predictions: BucketPrediction[] = raw.map(({ m, fs, fd, roundedSum, roundedDiff, isExactHit, rawScore }) => ({
+    bucketId: m.bucketId,
+    label: m.label,
+    scores: SCORE_BUCKETS.find((b) => b.id === m.bucketId)?.scores ?? [],
+    confidence: Math.round((rawScore / totalScore) * 1000) / 10,
+    rawSum: Math.round(fs * 100) / 100,
+    rawDiff: Math.round(fd * 100) / 100,
+    roundedSum,
+    roundedDiff,
+    isExactHit,
+    trainAccuracy: m.trainAccuracy,
+    fpRate: m.fpRate,
+  }));
+
+  // Sort by confidence descending
+  predictions.sort((a, b) => b.confidence - a.confidence);
+  return predictions;
+}
+
+// ── Single-row predict helper (legacy, kept for compat) ─────────────────────
 export function predictBucketFromRow(
   row: Record<string, any>,
   model: { weightsSum: number[]; weightsDiff: number[]; biasSum: number; biasDiff: number; normMean: number[]; normStd: number[]; featureNames: string[] },
