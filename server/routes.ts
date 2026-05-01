@@ -12,10 +12,16 @@ import {
 } from "./scoreOutcomeTrainer";
 import { proxyFetch } from "./proxyFetch";
 
-const openai = new OpenAI({
-  apiKey: process.env.AI_INTEGRATIONS_OPENAI_API_KEY,
-  baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
-});
+let _openai: OpenAI | null = null;
+function getOpenAI(): OpenAI {
+  if (!_openai) {
+    _openai = new OpenAI({
+      apiKey: process.env.AI_INTEGRATIONS_OPENAI_API_KEY,
+      baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
+    });
+  }
+  return _openai;
+}
 
 const SOFASCORE_API = "https://api.sofascore.com/api/v1";
 
@@ -4666,7 +4672,7 @@ Output ONLY a valid JSON object. No markdown, no code blocks, no explanation out
   "dataConfidence": "High / Medium / Low"
 }`;
 
-      const response = await openai.chat.completions.create({
+      const response = await getOpenAI().chat.completions.create({
         model: "gpt-5.4",
         messages: [{ role: "user", content: prompt }],
         max_completion_tokens: 6000,
@@ -4775,7 +4781,7 @@ Your job:
 
 Format with clear markdown headings (### for sections). Keep it punchy but thorough.`;
 
-      const response = await openai.chat.completions.create({
+      const response = await getOpenAI().chat.completions.create({
         model: "gpt-5.4",
         messages: [
           { role: "system", content: systemPrompt },

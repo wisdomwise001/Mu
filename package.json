@@ -52,7 +52,7 @@
     "ml-matrix": "^6.12.2",
     "ml-random-forest": "^2.1.0",
     "ml-regression": "^6.3.0",
-    "openai": "^6.34.0",
+    "openai": "^6.35.0",
     "p-limit": "^7.3.0",
     "p-retry": "^7.1.1",
     "pg": "^8.16.3",
