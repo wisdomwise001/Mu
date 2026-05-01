@@ -13,7 +13,7 @@ import {
   type TrainedOutcomeModel,
   type BucketPrediction,
 } from "./scoreOutcomeTrainer";
-import { proxyFetch, reloadProxies } from "./proxyFetch";
+import { proxyFetch, reloadProxies, getProxyStats } from "./proxyFetch";
 import { scrapeGeonodeProxies } from "./proxyScraper";
 
 let _openai: OpenAI | null = null;
@@ -2257,6 +2257,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.get("/api/admin/refresh-proxies/status", (_req: Request, res: Response) => {
     res.json(proxyScrapeState);
+  });
+
+  app.get("/api/admin/proxy-stats", (_req: Request, res: Response) => {
+    res.json({ ...getProxyStats(), scrape: proxyScrapeState });
   });
 
   app.get(

@@ -1,17 +1,176 @@
 import fs from "node:fs";
 import path from "node:path";
 import https from "node:https";
-import http from "node:http";
 import { SocksProxyAgent } from "socks-proxy-agent";
 import { HttpsProxyAgent } from "https-proxy-agent";
 
 const PROXIES_PATH = path.join(process.cwd(), "data", "proxies.json");
-const GEONODE_API = "https://proxylist.geonode.com/api/proxy-list";
-const TEST_URL = "https://api.sofascore.com/api/v1/sport/football/events/live";
-const TEST_TIMEOUT_MS = 7000;
-const TEST_CONCURRENCY = 40;
-const MIN_UPTIME = 50;
 
+// ── Sources ───────────────────────────────────────────────────────────────────
+const GEONODE_API = "https://proxylist.geonode.com/api/proxy-list";
+const PROXYSCRAPE_HTTP =
+  "https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=5000&country=all&ssl=all&anonymity=all";
+const PROXYSCRAPE_SOCKS5 =
+  "https://api.proxyscrape.com/v2/?request=getproxies&protocol=socks5&timeout=5000&country=all";
+const PROXYSCRAPE_SOCKS4 =
+  "https://api.proxyscrape.com/v2/?request=getproxies&protocol=socks4&timeout=5000&country=all";
+
+// ── Validation config ─────────────────────────────────────────────────────────
+// Test directly against SofaScore so we only keep proxies that can reach it
+const TEST_HOST = "api.sofascore.com";
+const TEST_PATH = "/api/v1/sport/football/events/live";
+const TIER1_TIMEOUT_MS = 2000;  // Elite: < 2 s round-trip
+const TIER2_TIMEOUT_MS = 6000;  // Backup: 2–6 s round-trip
+const TEST_CONCURRENCY = 100;   // Parallel validation slots
+const MIN_UPTIME = 30;          // Geonode uptime filter (%)
+
+export interface ScrapedProxy {
+  proxy: string;
+  protocol: string;
+  ip: string;
+  port: number;
+  anonymity: string;
+  upTime: number;
+  speed: number;
+  latency: number;       // Geonode-reported latency
+  measuredMs: number;    // Actual measured round-trip against SofaScore
+  tier: 1 | 2;
+  country: string;
+  source: string;
+  verified: true;
+}
+
+// ── Protocol priority ─────────────────────────────────────────────────────────
+const PROTOCOL_PRIORITY: Record<string, number> = {
+  socks5: 3,
+  socks4: 2,
+  https: 1,
+  http: 0,
+};
+
+function pickProtocol(protocols: string[]): string {
+  return (
+    protocols
+      .slice()
+      .sort((a, b) => (PROTOCOL_PRIORITY[b] ?? -1) - (PROTOCOL_PRIORITY[a] ?? -1))[0] ?? "http"
+  );
+}
+
+function buildAgent(proxyUrl: string, protocol: string): any {
+  try {
+    if (protocol.startsWith("socks")) return new SocksProxyAgent(proxyUrl);
+    if (protocol === "http" || protocol === "https") return new HttpsProxyAgent(proxyUrl);
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
+// ── Per-proxy latency test against SofaScore ──────────────────────────────────
+// Wraps the raw probe in Promise.race with a hard deadline so hanging sockets
+// (especially SOCKS5) can never block the validation loop indefinitely.
+function probeProxy(
+  proxyUrl: string,
+  protocol: string,
+  timeoutMs: number
+): Promise<{ ok: boolean; measuredMs: number }> {
+  const hard = new Promise<{ ok: boolean; measuredMs: number }>((resolve) =>
+    setTimeout(() => resolve({ ok: false, measuredMs: 0 }), timeoutMs + 1500)
+  );
+
+  const attempt = new Promise<{ ok: boolean; measuredMs: number }>((resolve) => {
+    const agent = buildAgent(proxyUrl, protocol);
+    if (!agent) return resolve({ ok: false, measuredMs: 0 });
+
+    let settled = false;
+    const done = (ok: boolean, ms: number) => {
+      if (settled) return;
+      settled = true;
+      resolve({ ok, measuredMs: ms });
+    };
+
+    const start = Date.now();
+    try {
+      const req = https.request(
+        {
+          method: "GET",
+          host: TEST_HOST,
+          port: 443,
+          path: TEST_PATH,
+          headers: {
+            "User-Agent":
+              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            Referer: "https://www.sofascore.com/",
+            Origin: "https://www.sofascore.com",
+            Accept: "*/*",
+            Connection: "close",
+          },
+          agent,
+        },
+        (res) => {
+          const ms = Date.now() - start;
+          res.destroy();
+          done(!!res.statusCode && res.statusCode > 0, ms);
+        }
+      );
+      req.setTimeout(timeoutMs, () => { try { req.destroy(); } catch { /* ignore */ } done(false, 0); });
+      req.on("error", () => done(false, 0));
+      req.end();
+    } catch {
+      done(false, 0);
+    }
+  });
+
+  return Promise.race([attempt, hard]);
+}
+
+// ── Semaphore-limited concurrent validation ───────────────────────────────────
+async function validateAll(
+  candidates: Array<{ proxy: string; protocol: string; [k: string]: any }>,
+  onProgress?: (msg: string) => void
+): Promise<ScrapedProxy[]> {
+  const results: ScrapedProxy[] = [];
+  let tested = 0;
+  const total = candidates.length;
+  let idx = 0;
+  const MAX_RESULTS = 150;
+
+  const runSlot = async () => {
+    while (true) {
+      // Check early-exit BEFORE picking the next item
+      if (results.length >= MAX_RESULTS) return;
+
+      const item = candidates[idx++];
+      if (!item) return;
+
+      // Tier-1 probe first (fast), fall back to Tier-2 (slower)
+      let result = await probeProxy(item.proxy, item.protocol, TIER1_TIMEOUT_MS);
+      let tier: 1 | 2 = 1;
+      if (!result.ok) {
+        if (results.length >= MAX_RESULTS) return;
+        result = await probeProxy(item.proxy, item.protocol, TIER2_TIMEOUT_MS);
+        tier = 2;
+      }
+
+      tested++;
+      if (tested % TEST_CONCURRENCY === 0 || tested === total) {
+        onProgress?.(
+          `Validated ${tested}/${total} — ${results.length} working ` +
+          `(T1: ${results.filter(r => r.tier === 1).length}, T2: ${results.filter(r => r.tier === 2).length})…`
+        );
+      }
+
+      if (result.ok && results.length < MAX_RESULTS) {
+        results.push({ ...item, measuredMs: result.measuredMs, tier, verified: true } as ScrapedProxy);
+      }
+    }
+  };
+
+  await Promise.all(Array.from({ length: TEST_CONCURRENCY }, () => runSlot()));
+  return results;
+}
+
+// ── Source: Geonode API ───────────────────────────────────────────────────────
 interface GeonodeProxy {
   ip: string;
   port: string;
@@ -22,204 +181,143 @@ interface GeonodeProxy {
   latency?: number;
   country?: string;
 }
-
 interface GeonodeResponse {
   data: GeonodeProxy[];
-  total: number;
-  page: number;
-  limit: number;
 }
 
-export interface ScrapedProxy {
-  proxy: string;
-  protocol: string;
-  ip: string;
-  port: number;
-  anonymity: string;
-  upTime: number;
-  speed: number;
-  latency: number;
-  country: string;
-  verified?: boolean;
-}
-
-const PROTOCOL_PRIORITY: Record<string, number> = { socks5: 3, socks4: 2, https: 1, http: 0 };
-
-function pickProtocol(protocols: string[]): string {
-  return protocols.slice().sort(
-    (a, b) => (PROTOCOL_PRIORITY[b] ?? -1) - (PROTOCOL_PRIORITY[a] ?? -1)
-  )[0] ?? "http";
-}
-
-function buildAgent(proxyUrl: string, protocol: string): any {
-  try {
-    if (protocol.startsWith("socks")) return new SocksProxyAgent(proxyUrl);
-    if (protocol === "http" || protocol === "https") return new HttpsProxyAgent(proxyUrl);
-  } catch { /* ignore */ }
-  return null;
-}
-
-function testProxy(proxyUrl: string, protocol: string): Promise<boolean> {
-  return new Promise((resolve) => {
-    const agent = buildAgent(proxyUrl, protocol);
-    if (!agent) return resolve(false);
-
-    let settled = false;
-    const done = (ok: boolean) => {
-      if (settled) return;
-      settled = true;
-      resolve(ok);
-    };
-
-    try {
-      const url = new URL(TEST_URL);
-      const req = https.request(
-        {
-          method: "GET",
-          host: url.hostname,
-          port: 443,
-          path: url.pathname + url.search,
-          headers: {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            "Referer": "https://www.sofascore.com/",
-            "Origin": "https://www.sofascore.com",
-            "Accept": "*/*",
-          },
-          agent,
-        },
-        (res) => {
-          res.destroy();
-          // 200 = works great, 403/429 = proxy reachable but blocked, still usable
-          const ok = res.statusCode !== undefined && res.statusCode > 0;
-          done(ok);
-        }
-      );
-      req.setTimeout(TEST_TIMEOUT_MS, () => {
-        req.destroy();
-        done(false);
-      });
-      req.on("error", () => done(false));
-      req.end();
-    } catch {
-      done(false);
-    }
-  });
-}
-
-async function testBatch(proxies: ScrapedProxy[]): Promise<ScrapedProxy[]> {
-  const results = await Promise.all(
-    proxies.map(async (p) => {
-      const ok = await testProxy(p.proxy, p.protocol);
-      return ok ? { ...p, verified: true } : null;
-    })
-  );
-  return results.filter(Boolean) as ScrapedProxy[];
-}
-
-async function fetchPage(
-  page: number,
-  limit = 500,
-  sortBy = "speed",
-  sortType = "asc"
-): Promise<GeonodeProxy[]> {
+async function fetchGeonode(page: number): Promise<any[]> {
   const params = new URLSearchParams({
-    limit: String(limit),
+    limit: "500",
     page: String(page),
-    sort_by: sortBy,
-    sort_type: sortType,
+    sort_by: "speed",
+    sort_type: "asc",
     filterUpTime: String(MIN_UPTIME),
   });
-  const url = `${GEONODE_API}?${params}`;
-  const res = await fetch(url, {
-    headers: { "User-Agent": "Mozilla/5.0 (compatible; proxy-scraper/2.0)" },
+  const res = await fetch(`${GEONODE_API}?${params}`, {
+    headers: { "User-Agent": "Mozilla/5.0 (compatible; proxy-scraper/3.0)" },
     signal: AbortSignal.timeout(25000),
   });
-  if (!res.ok) throw new Error(`Geonode returned HTTP ${res.status}`);
+  if (!res.ok) throw new Error(`Geonode HTTP ${res.status}`);
   const body: GeonodeResponse = await res.json();
-  return body.data ?? [];
+  return (body.data ?? []).map((p) => {
+    const protocol = pickProtocol(p.protocols ?? ["http"]);
+    const port = Number(p.port);
+    return {
+      proxy: `${protocol}://${p.ip}:${port}`,
+      protocol,
+      ip: p.ip,
+      port,
+      anonymity: p.anonymityLevel ?? "unknown",
+      upTime: p.upTime ?? 0,
+      speed: p.speed ?? 99999,
+      latency: p.latency ?? 99999,
+      measuredMs: 0,
+      tier: 2 as const,
+      country: p.country ?? "",
+      source: "geonode",
+      verified: true as const,
+    };
+  });
 }
 
+// ── Source: ProxyScrape plain-text lists ─────────────────────────────────────
+async function fetchProxyScrape(url: string, protocol: string): Promise<any[]> {
+  const res = await fetch(url, {
+    headers: { "User-Agent": "Mozilla/5.0 (compatible; proxy-scraper/3.0)" },
+    signal: AbortSignal.timeout(20000),
+  });
+  if (!res.ok) return [];
+  const text = await res.text();
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => /^\d+\.\d+\.\d+\.\d+:\d+$/.test(line))
+    .map((line) => {
+      const [ip, portStr] = line.split(":");
+      const port = Number(portStr);
+      return {
+        proxy: `${protocol}://${ip}:${port}`,
+        protocol,
+        ip,
+        port,
+        anonymity: "unknown",
+        upTime: 0,
+        speed: 99999,
+        latency: 99999,
+        measuredMs: 0,
+        tier: 2 as const,
+        country: "",
+        source: `proxyscrape-${protocol}`,
+        verified: true as const,
+      };
+    });
+}
+
+// ── Main export ───────────────────────────────────────────────────────────────
 export async function scrapeGeonodeProxies(
   onProgress?: (msg: string) => void
 ): Promise<{ added: number; total: number; verified: number; path: string }> {
-  onProgress?.(`Fetching fastest proxies from Geonode (uptime ≥ ${MIN_UPTIME}%, sorted by speed)…`);
+  onProgress?.("Scraping proxies from multiple sources…");
 
-  let page1: GeonodeProxy[] = [];
-  let page2: GeonodeProxy[] = [];
+  // Fetch from all sources in parallel
+  const [geoP1, geoP2, psHttp, psSocks5, psSocks4] = await Promise.allSettled([
+    fetchGeonode(1),
+    fetchGeonode(2),
+    fetchProxyScrape(PROXYSCRAPE_HTTP, "http"),
+    fetchProxyScrape(PROXYSCRAPE_SOCKS5, "socks5"),
+    fetchProxyScrape(PROXYSCRAPE_SOCKS4, "socks4"),
+  ]);
 
-  try {
-    page1 = await fetchPage(1, 500, "speed", "asc");
-    onProgress?.(`Got ${page1.length} proxies from page 1, fetching page 2…`);
-  } catch (e: any) {
-    throw new Error(`Failed to fetch Geonode page 1: ${e.message}`);
-  }
+  const raw = [
+    ...(geoP1.status === "fulfilled" ? geoP1.value : []),
+    ...(geoP2.status === "fulfilled" ? geoP2.value : []),
+    ...(psHttp.status === "fulfilled" ? psHttp.value : []),
+    ...(psSocks5.status === "fulfilled" ? psSocks5.value : []),
+    ...(psSocks4.status === "fulfilled" ? psSocks4.value : []),
+  ];
 
-  try {
-    page2 = await fetchPage(2, 500, "speed", "asc");
-    onProgress?.(`Got ${page2.length} proxies from page 2. Deduplicating…`);
-  } catch {
-    onProgress?.("Page 2 fetch failed — continuing with page 1 only");
-  }
+  onProgress?.(
+    `Sources: Geonode p1=${geoP1.status === "fulfilled" ? geoP1.value.length : 0}, ` +
+    `p2=${geoP2.status === "fulfilled" ? geoP2.value.length : 0}, ` +
+    `ProxyScrape HTTP=${psHttp.status === "fulfilled" ? psHttp.value.length : 0}, ` +
+    `SOCKS5=${psSocks5.status === "fulfilled" ? psSocks5.value.length : 0}, ` +
+    `SOCKS4=${psSocks4.status === "fulfilled" ? psSocks4.value.length : 0}`
+  );
 
-  const all = [...page1, ...page2];
-
-  const seen = new Map<string, ScrapedProxy>();
-  for (const p of all) {
-    if (!p.ip || !p.port || !p.protocols?.length) continue;
-    const port = Number(p.port);
-    if (!port) continue;
-    const protocol = pickProtocol(p.protocols);
-    const proxyUrl = `${protocol}://${p.ip}:${port}`;
-    const key = `${p.ip}:${port}`;
+  // Deduplicate by ip:port, prefer highest protocol priority
+  const seen = new Map<string, any>();
+  for (const p of raw) {
+    const key = `${p.ip}:${p.port}`;
     const existing = seen.get(key);
-    if (
-      !existing ||
-      (PROTOCOL_PRIORITY[protocol] ?? -1) > (PROTOCOL_PRIORITY[existing.protocol] ?? -1)
-    ) {
-      seen.set(key, {
-        proxy: proxyUrl,
-        protocol,
-        ip: p.ip,
-        port,
-        anonymity: p.anonymityLevel ?? "unknown",
-        upTime: p.upTime ?? 0,
-        speed: p.speed ?? 99999,
-        latency: p.latency ?? 99999,
-        country: p.country ?? "",
-      });
+    if (!existing || (PROTOCOL_PRIORITY[p.protocol] ?? -1) > (PROTOCOL_PRIORITY[existing.protocol] ?? -1)) {
+      seen.set(key, p);
     }
   }
 
   const candidates = Array.from(seen.values());
   onProgress?.(
-    `Deduped to ${candidates.length} proxies. Testing against SofaScore in batches of ${TEST_CONCURRENCY}…`
+    `${raw.length} raw → ${candidates.length} unique. Validating against SofaScore (${TEST_CONCURRENCY} concurrent)…`
   );
 
-  const verified: ScrapedProxy[] = [];
-  for (let i = 0; i < candidates.length; i += TEST_CONCURRENCY) {
-    const batch = candidates.slice(i, i + TEST_CONCURRENCY);
-    const good = await testBatch(batch);
-    verified.push(...good);
-    onProgress?.(
-      `Tested ${Math.min(i + TEST_CONCURRENCY, candidates.length)}/${candidates.length} — ${verified.length} verified so far…`
-    );
-    if (verified.length >= 100) {
-      onProgress?.(`Reached 100 verified proxies — stopping early.`);
-      break;
-    }
-  }
+  const verified = await validateAll(candidates, onProgress);
 
-  // Sort: fastest (lowest speed) first
-  verified.sort((a, b) => (a.speed ?? 99999) - (b.speed ?? 99999));
+  // Sort: Tier 1 first, then by measuredMs ascending
+  verified.sort((a, b) => {
+    if (a.tier !== b.tier) return a.tier - b.tier;
+    return a.measuredMs - b.measuredMs;
+  });
 
-  onProgress?.(`Writing ${verified.length} verified proxies to disk…`);
+  onProgress?.(`Writing ${verified.length} verified proxies (T1: ${verified.filter(v => v.tier === 1).length}, T2: ${verified.filter(v => v.tier === 2).length})…`);
   fs.mkdirSync(path.dirname(PROXIES_PATH), { recursive: true });
   fs.writeFileSync(PROXIES_PATH, JSON.stringify(verified, null, 2), "utf-8");
 
-  onProgress?.(`Done. ${verified.length} verified proxies saved (from ${all.length} raw).`);
+  onProgress?.(
+    `Done. ${verified.length} verified proxies from ${raw.length} raw candidates.`
+  );
+
   return {
     added: verified.length,
-    total: all.length,
+    total: raw.length,
     verified: verified.length,
     path: PROXIES_PATH,
   };

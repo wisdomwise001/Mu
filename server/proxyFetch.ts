@@ -5,113 +5,49 @@ import http from "node:http";
 import { SocksProxyAgent } from "socks-proxy-agent";
 import { HttpsProxyAgent } from "https-proxy-agent";
 
-type ProxyEntry = {
+// ── Config ────────────────────────────────────────────────────────────────────
+const PROXIES_PATH = path.join(process.cwd(), "data", "proxies.json");
+const REQUEST_TIMEOUT_MS = 8000;
+const DEAD_RETRY_AFTER_MS = 10 * 60 * 1000; // recycle dead proxies after 10 min
+const HEALTH_CHECK_INTERVAL_MS = 5 * 60 * 1000; // background health-check every 5 min
+const MAX_ATTEMPTS_PER_REQUEST = 6;
+
+// ── Scoring weights ───────────────────────────────────────────────────────────
+const W_LATENCY = 0.40;
+const W_SUCCESS_RATE = 0.40;
+const W_STABILITY = 0.20;
+
+// ── Types ─────────────────────────────────────────────────────────────────────
+interface ProxyFile {
   proxy: string;
   protocol: string;
-  ip: string;
-  port: number;
-};
+  ip?: string;
+  port?: number;
+  measuredMs?: number;
+  tier?: 1 | 2;
+  upTime?: number;
+  speed?: number;
+}
 
-type ProxyState = {
+interface ProxyState {
   url: string;
+  protocol: string;
   agent: any;
-  failures: number;
+  tier: 1 | 2;
+  // Scoring counters
+  requests: number;
+  successes: number;
+  totalLatencyMs: number;
+  avgLatencyMs: number;
+  successRate: number; // 0–1
+  score: number;       // 0–100
+  // Pool state
+  consecutiveFails: number;
+  deadSince: number | null;
   lastUsed: number;
-  goodHits: number;
-};
-
-const PROXIES_PATH = path.join(process.cwd(), "data", "proxies.json");
-const REQUEST_TIMEOUT_MS = 6000;
-const MAX_PROXY_ATTEMPTS = 5;
-const FAILURE_BLACKLIST_THRESHOLD = 3;
-
-let allProxies: ProxyState[] = [];
-let workingProxies: ProxyState[] = [];
-let stickyProxy: ProxyState | null = null;
-let initialized = false;
-
-function buildAgent(p: ProxyEntry): any | null {
-  try {
-    if (p.protocol.startsWith("socks")) {
-      return new SocksProxyAgent(p.proxy);
-    }
-    if (p.protocol === "http" || p.protocol === "https") {
-      return new HttpsProxyAgent(p.proxy);
-    }
-  } catch {
-    return null;
-  }
-  return null;
 }
 
-function loadProxies(): void {
-  if (initialized) return;
-  initialized = true;
-  try {
-    const raw = fs.readFileSync(PROXIES_PATH, "utf-8");
-    const list: ProxyEntry[] = JSON.parse(raw);
-    for (const p of list) {
-      const agent = buildAgent(p);
-      if (!agent) continue;
-      allProxies.push({
-        url: p.proxy,
-        agent,
-        failures: 0,
-        lastUsed: 0,
-        goodHits: 0,
-      });
-    }
-    for (let i = allProxies.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [allProxies[i], allProxies[j]] = [allProxies[j], allProxies[i]];
-    }
-    console.log(`[proxyFetch] Loaded ${allProxies.length} proxies`);
-  } catch (e) {
-    console.warn("[proxyFetch] Could not load proxies:", (e as Error).message);
-  }
-}
-
-/** Call after writing a fresh proxies.json to hot-reload the pool without restarting. */
-export function reloadProxies(): void {
-  initialized = false;
-  allProxies = [];
-  workingProxies = [];
-  stickyProxy = null;
-  loadProxies();
-}
-
-function pickProxy(exclude: Set<ProxyState>): ProxyState | null {
-  const candidates = allProxies.filter(
-    (p) => !exclude.has(p) && p.failures < FAILURE_BLACKLIST_THRESHOLD
-  );
-  if (candidates.length === 0) {
-    for (const p of allProxies) p.failures = 0;
-    const fresh = allProxies.filter((p) => !exclude.has(p));
-    return fresh.length ? fresh[Math.floor(Math.random() * fresh.length)] : null;
-  }
-  return candidates[Math.floor(Math.random() * candidates.length)];
-}
-
-function markGood(p: ProxyState): void {
-  p.failures = 0;
-  p.goodHits++;
-  p.lastUsed = Date.now();
-  if (!workingProxies.includes(p)) {
-    workingProxies.unshift(p);
-    if (workingProxies.length > 10) workingProxies.pop();
-  }
-  stickyProxy = p;
-}
-
-function markBad(p: ProxyState): void {
-  p.failures++;
-  if (p.failures >= FAILURE_BLACKLIST_THRESHOLD) {
-    workingProxies = workingProxies.filter((x) => x !== p);
-    if (stickyProxy === p) stickyProxy = null;
-  }
-}
-
-type SimpleResponse = {
+export type SimpleResponse = {
   ok: boolean;
   status: number;
   statusText: string;
@@ -121,13 +57,175 @@ type SimpleResponse = {
   arrayBuffer: () => Promise<ArrayBuffer>;
 };
 
+// ── Module-level pool ─────────────────────────────────────────────────────────
+let activePool: ProxyState[] = [];     // scored working proxies
+let deadPool: ProxyState[] = [];       // failed proxies (retry after DEAD_RETRY_AFTER_MS)
+let initialized = false;
+let healthTimer: NodeJS.Timeout | null = null;
+
+// ── Build agent ───────────────────────────────────────────────────────────────
+function buildAgent(proxyUrl: string, protocol: string): any {
+  try {
+    if (protocol.startsWith("socks")) return new SocksProxyAgent(proxyUrl);
+    if (protocol === "http" || protocol === "https") return new HttpsProxyAgent(proxyUrl);
+  } catch { /* ignore */ }
+  return null;
+}
+
+// ── Scoring ───────────────────────────────────────────────────────────────────
+function computeScore(p: ProxyState): number {
+  // Latency score: 100 at 0 ms, 0 at 6000 ms
+  const latScore =
+    p.avgLatencyMs > 0
+      ? Math.max(0, 100 - (p.avgLatencyMs / 60))
+      : p.tier === 1 ? 70 : 40; // tier-based default for untested
+
+  // Success-rate score
+  const srScore = p.requests > 0 ? (p.successes / p.requests) * 100 : 50;
+
+  // Stability score: trust grows with more confirmed successes (caps at 10)
+  const stabScore = Math.min(100, p.successes * 10);
+
+  return latScore * W_LATENCY + srScore * W_SUCCESS_RATE + stabScore * W_STABILITY;
+}
+
+function refreshScore(p: ProxyState): void {
+  p.avgLatencyMs =
+    p.successes > 0 ? p.totalLatencyMs / p.successes : p.avgLatencyMs;
+  p.successRate = p.requests > 0 ? p.successes / p.requests : 0;
+  p.score = computeScore(p);
+}
+
+// ── Weighted random pick ───────────────────────────────────────────────────────
+function weightedPick(pool: ProxyState[], exclude: Set<ProxyState>): ProxyState | null {
+  const candidates = pool.filter((p) => !exclude.has(p));
+  if (candidates.length === 0) return null;
+
+  const totalWeight = candidates.reduce((s, p) => s + Math.max(1, p.score), 0);
+  let rand = Math.random() * totalWeight;
+  for (const p of candidates) {
+    rand -= Math.max(1, p.score);
+    if (rand <= 0) return p;
+  }
+  return candidates[candidates.length - 1];
+}
+
+// ── Mark good / bad ───────────────────────────────────────────────────────────
+function markGood(p: ProxyState, latencyMs: number): void {
+  p.requests++;
+  p.successes++;
+  p.totalLatencyMs += latencyMs;
+  p.consecutiveFails = 0;
+  p.lastUsed = Date.now();
+  p.deadSince = null;
+  refreshScore(p);
+  // Keep active pool sorted by score descending
+  activePool.sort((a, b) => b.score - a.score);
+}
+
+function markBad(p: ProxyState): void {
+  p.requests++;
+  p.consecutiveFails++;
+  refreshScore(p);
+
+  // Move to dead pool after 2 consecutive failures
+  if (p.consecutiveFails >= 2) {
+    activePool = activePool.filter((x) => x !== p);
+    if (!deadPool.includes(p)) {
+      p.deadSince = Date.now();
+      deadPool.push(p);
+    }
+  }
+}
+
+// ── Load proxies from disk ────────────────────────────────────────────────────
+function loadProxies(): void {
+  if (initialized) return;
+  initialized = true;
+  try {
+    const raw = fs.readFileSync(PROXIES_PATH, "utf-8");
+    const list: ProxyFile[] = JSON.parse(raw);
+    const loaded: ProxyState[] = [];
+    for (const p of list) {
+      const agent = buildAgent(p.proxy, p.protocol);
+      if (!agent) continue;
+      const tier = p.tier ?? 2;
+      const initLatency = p.measuredMs ?? (tier === 1 ? 800 : 2500);
+      const state: ProxyState = {
+        url: p.proxy,
+        protocol: p.protocol,
+        agent,
+        tier,
+        requests: 0,
+        successes: 0,
+        totalLatencyMs: 0,
+        avgLatencyMs: initLatency,
+        successRate: 0,
+        score: 0,
+        consecutiveFails: 0,
+        deadSince: null,
+        lastUsed: 0,
+      };
+      state.score = computeScore(state);
+      loaded.push(state);
+    }
+    // Sort Tier-1 first, then by initial score
+    loaded.sort((a, b) => {
+      if (a.tier !== b.tier) return a.tier - b.tier;
+      return b.score - a.score;
+    });
+    activePool = loaded;
+    console.log(
+      `[proxyPool] Loaded ${activePool.length} proxies ` +
+      `(T1: ${activePool.filter(p => p.tier === 1).length}, T2: ${activePool.filter(p => p.tier === 2).length})`
+    );
+  } catch (e) {
+    console.warn("[proxyPool] Could not load proxies:", (e as Error).message);
+  }
+}
+
+/** Hot-reload pool after scraper writes a fresh proxies.json */
+export function reloadProxies(): void {
+  if (healthTimer) { clearInterval(healthTimer); healthTimer = null; }
+  initialized = false;
+  activePool = [];
+  deadPool = [];
+  loadProxies();
+  startHealthCheck();
+}
+
+// ── Background health-check: recycle dead proxies ─────────────────────────────
+function startHealthCheck(): void {
+  if (healthTimer) return;
+  healthTimer = setInterval(() => {
+    const now = Date.now();
+    const toRevive = deadPool.filter(
+      (p) => p.deadSince !== null && now - p.deadSince >= DEAD_RETRY_AFTER_MS
+    );
+    if (toRevive.length > 0) {
+      deadPool = deadPool.filter((p) => !toRevive.includes(p));
+      for (const p of toRevive) {
+        p.consecutiveFails = 0;
+        p.deadSince = null;
+        p.score = computeScore(p);
+        activePool.push(p);
+      }
+      activePool.sort((a, b) => b.score - a.score);
+      console.log(`[proxyPool] Recycled ${toRevive.length} dead proxies back to active.`);
+    }
+  }, HEALTH_CHECK_INTERVAL_MS);
+}
+
+// ── Low-level request through proxy agent ────────────────────────────────────
 function requestThroughAgent(
   urlStr: string,
   init: RequestInit,
-  agent: any
-): Promise<SimpleResponse> {
+  agent: any,
+  timeoutMs = REQUEST_TIMEOUT_MS
+): Promise<{ res: SimpleResponse; latencyMs: number }> {
   return new Promise((resolve, reject) => {
     let settled = false;
+    const start = Date.now();
     const url = new URL(urlStr);
     const isHttps = url.protocol === "https:";
     const lib = isHttps ? https : http;
@@ -153,6 +251,7 @@ function requestThroughAgent(
         res.on("end", () => {
           if (settled) return;
           settled = true;
+          const latencyMs = Date.now() - start;
           const buf = Buffer.concat(chunks);
           const status = res.statusCode || 0;
           const respHeaders = new Headers();
@@ -161,14 +260,17 @@ function requestThroughAgent(
             else if (v != null) respHeaders.set(k, String(v));
           }
           resolve({
-            ok: status >= 200 && status < 300,
-            status,
-            statusText: res.statusMessage || "",
-            headers: respHeaders,
-            text: async () => buf.toString("utf-8"),
-            json: async () => JSON.parse(buf.toString("utf-8")),
-            arrayBuffer: async () =>
-              buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) as ArrayBuffer,
+            latencyMs,
+            res: {
+              ok: status >= 200 && status < 300,
+              status,
+              statusText: res.statusMessage || "",
+              headers: respHeaders,
+              text: async () => buf.toString("utf-8"),
+              json: async () => JSON.parse(buf.toString("utf-8")),
+              arrayBuffer: async () =>
+                buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) as ArrayBuffer,
+            },
           });
         });
         res.on("error", (err) => {
@@ -179,37 +281,32 @@ function requestThroughAgent(
       }
     );
 
-    req.setTimeout(REQUEST_TIMEOUT_MS, () => {
+    req.setTimeout(timeoutMs, () => {
       if (settled) return;
       settled = true;
-      req.destroy(new Error("proxy request timeout"));
-      reject(new Error("proxy request timeout"));
+      req.destroy(new Error("proxy timeout"));
+      reject(new Error("proxy timeout"));
     });
-
     req.on("error", (err) => {
       if (settled) return;
       settled = true;
       reject(err);
     });
 
-    if (init.body) {
-      req.write(init.body as any);
-    }
+    if (init.body) req.write(init.body as any);
     req.end();
   });
 }
 
-/**
- * Fetch a URL through a rotating SOCKS5/HTTP proxy pool.
- * Returns a fetch-compatible response (ok/status/json/text/arrayBuffer/headers).
- * Tries sticky/working proxies first; rotates on failures.
- */
+// ── Main export: smart proxy fetch with weighted rotation ─────────────────────
 export async function proxyFetch(
   url: string,
   init: RequestInit = {}
 ): Promise<SimpleResponse> {
   loadProxies();
-  if (allProxies.length === 0) {
+
+  // No proxies → direct fetch fallback
+  if (activePool.length === 0 && deadPool.length === 0) {
     const r = await fetch(url, init);
     const buf = Buffer.from(await r.arrayBuffer());
     return {
@@ -226,51 +323,64 @@ export async function proxyFetch(
 
   const tried = new Set<ProxyState>();
 
-  const order: ProxyState[] = [];
-  if (stickyProxy) order.push(stickyProxy);
-  for (const p of workingProxies) if (!order.includes(p)) order.push(p);
+  for (let attempt = 0; attempt < MAX_ATTEMPTS_PER_REQUEST; attempt++) {
+    // Tier-1 first, then weighted pick from all active
+    let proxy: ProxyState | null = null;
+    const tier1 = activePool.filter((p) => p.tier === 1 && !tried.has(p));
+    if (tier1.length > 0) {
+      proxy = weightedPick(tier1, tried);
+    }
+    if (!proxy) {
+      proxy = weightedPick(activePool, tried);
+    }
+    if (!proxy) break;
 
-  for (const p of order) {
-    if (tried.has(p)) continue;
-    tried.add(p);
+    tried.add(proxy);
+
     try {
-      const res = await requestThroughAgent(url, init, p.agent);
-      if (res.status > 0 && res.status !== 403 && res.status !== 429 && res.status < 500) {
-        if (res.ok) markGood(p);
+      const timeout = proxy.tier === 1 ? 4000 : REQUEST_TIMEOUT_MS;
+      const { res, latencyMs } = await requestThroughAgent(url, init, proxy.agent, timeout);
+
+      // Any real response (even 403/429) means the proxy is alive
+      if (res.status > 0) {
+        if (res.ok || res.status === 404) {
+          markGood(proxy, latencyMs);
+        } else if (res.status === 403 || res.status === 429) {
+          // Proxy works, target blocked this IP — still usable
+          markGood(proxy, latencyMs);
+        } else {
+          markBad(proxy);
+        }
         return res;
       }
-      markBad(p);
+      markBad(proxy);
     } catch {
-      markBad(p);
-    }
-    if (tried.size >= MAX_PROXY_ATTEMPTS) break;
-  }
-
-  while (tried.size < MAX_PROXY_ATTEMPTS) {
-    const p = pickProxy(tried);
-    if (!p) break;
-    tried.add(p);
-    try {
-      const res = await requestThroughAgent(url, init, p.agent);
-      if (res.status > 0 && res.status !== 403 && res.status !== 429 && res.status < 500) {
-        if (res.ok) markGood(p);
-        return res;
-      }
-      markBad(p);
-    } catch {
-      markBad(p);
+      markBad(proxy);
     }
   }
 
-  throw new Error(
-    `proxyFetch: all ${tried.size} proxy attempts failed for ${url}`
-  );
+  throw new Error(`proxyFetch: all ${tried.size} proxy attempts failed for ${url}`);
 }
 
+// ── Stats export ──────────────────────────────────────────────────────────────
 export function getProxyStats() {
+  loadProxies();
+  const tier1 = activePool.filter((p) => p.tier === 1);
+  const tier2 = activePool.filter((p) => p.tier === 2);
+  const top = activePool
+    .slice(0, 5)
+    .map((p) => ({
+      url: p.url,
+      score: Math.round(p.score),
+      tier: p.tier,
+      successRate: Math.round(p.successRate * 100),
+      avgMs: Math.round(p.avgLatencyMs),
+    }));
   return {
-    total: allProxies.length,
-    working: workingProxies.length,
-    sticky: stickyProxy?.url ?? null,
+    active: activePool.length,
+    dead: deadPool.length,
+    tier1: tier1.length,
+    tier2: tier2.length,
+    topProxies: top,
   };
 }
