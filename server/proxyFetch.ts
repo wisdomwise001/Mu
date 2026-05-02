@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import https from "node:https";
 import http from "node:http";
+import zlib from "node:zlib";
 import { SocksProxyAgent } from "socks-proxy-agent";
 import { HttpsProxyAgent } from "https-proxy-agent";
 
@@ -10,8 +11,8 @@ const PROXIES_PATH = path.join(process.cwd(), "data", "proxies.json");
 const REQUEST_TIMEOUT_MS = 8000;
 const DEAD_RETRY_AFTER_MS = 10 * 60 * 1000; // recycle dead proxies after 10 min
 const HEALTH_CHECK_INTERVAL_MS = 5 * 60 * 1000; // background health-check every 5 min
-const RACE_WIDTH = 15;  // proxies fired simultaneously per round
-const MAX_ROUNDS  = 4;  // rounds = up to RACE_WIDTH * MAX_ROUNDS total attempts
+const RACE_WIDTH = 20;  // proxies fired simultaneously per round
+const MAX_ROUNDS  = 5;  // rounds = up to RACE_WIDTH * MAX_ROUNDS total attempts
 
 // ── Scoring weights ───────────────────────────────────────────────────────────
 const W_LATENCY = 0.40;
@@ -253,13 +254,23 @@ function requestThroughAgent(
           if (settled) return;
           settled = true;
           const latencyMs = Date.now() - start;
-          const buf = Buffer.concat(chunks);
+          const rawBuf = Buffer.concat(chunks);
           const status = res.statusCode || 0;
           const respHeaders = new Headers();
           for (const [k, v] of Object.entries(res.headers)) {
             if (Array.isArray(v)) respHeaders.set(k, v.join(", "));
             else if (v != null) respHeaders.set(k, String(v));
           }
+
+          // Decompress gzip / brotli / deflate responses
+          let buf = rawBuf;
+          const enc = (res.headers["content-encoding"] || "").toLowerCase();
+          try {
+            if (enc.includes("br")) buf = zlib.brotliDecompressSync(rawBuf);
+            else if (enc.includes("gzip")) buf = zlib.gunzipSync(rawBuf);
+            else if (enc.includes("deflate")) buf = zlib.inflateSync(rawBuf);
+          } catch { buf = rawBuf; /* fallback to raw if decompression fails */ }
+
           resolve({
             latencyMs,
             res: {

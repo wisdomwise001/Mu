@@ -1770,12 +1770,20 @@ function injectCustomXGIntoStatistics(data: any): any {
 
 const SOFASCORE_HEADERS: Record<string, string> = {
   "User-Agent":
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-  Accept: "*/*",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+  Accept: "application/json, text/plain, */*",
   "Accept-Language": "en-US,en;q=0.9",
+  "Accept-Encoding": "gzip, deflate, br",
   Referer: "https://www.sofascore.com/",
   Origin: "https://www.sofascore.com",
   "Cache-Control": "no-cache",
+  "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+  "Sec-Ch-Ua-Mobile": "?0",
+  "Sec-Ch-Ua-Platform": '"Windows"',
+  "Sec-Fetch-Dest": "empty",
+  "Sec-Fetch-Mode": "cors",
+  "Sec-Fetch-Site": "same-origin",
+  "X-Requested-With": "XMLHttpRequest",
 };
 
 // ─── SofaScore cache: in-memory + disk persistence ───────────────────────────
@@ -2332,7 +2340,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
     async (req: Request, res: Response) => {
       try {
         const { sport, date } = req.params;
-        const data = await fetchSofaScore(`/sport/${sport}/scheduled-events/${date}`);
+        const data = await fetchSofaScoreOptional(`/sport/${sport}/scheduled-events/${date}`);
+        if (!data) {
+          console.warn(`[scheduled-events] No data for ${date} — returning empty list`);
+          return res.json({ events: [] });
+        }
         res.json(data);
         // Background-warm adjacent dates so navigation is instant
         const d = new Date(date);
@@ -2344,7 +2356,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         }
       } catch (error: any) {
         console.error("Error fetching scheduled events:", error.message);
-        res.status(500).json({ error: error.message });
+        res.json({ events: [] });
       }
     },
   );
