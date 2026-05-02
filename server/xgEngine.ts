@@ -8,7 +8,6 @@
  *  - ml-matrix         → Matrix algebra for Gaussian Process
  */
 
-import "@tensorflow/tfjs-node";
 import * as tf from "@tensorflow/tfjs";
 import { RandomForestRegression } from "ml-random-forest";
 import { DecisionTreeRegression } from "ml-cart";
