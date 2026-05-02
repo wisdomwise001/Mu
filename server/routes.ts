@@ -1866,6 +1866,17 @@ async function fetchSofaScore(endpoint: string) {
   return promise;
 }
 
+// Like fetchSofaScore but returns null instead of throwing on 404 or 403
+async function fetchSofaScoreOptional(endpoint: string): Promise<any | null> {
+  try {
+    return await fetchSofaScore(endpoint);
+  } catch (err: any) {
+    const msg: string = err?.message ?? "";
+    if (msg.includes("404") || msg.includes("403")) return null;
+    throw err;
+  }
+}
+
 // Fire-and-forget background prefetch — never throws, never blocks the caller
 function prefetchBackground(endpoint: string): void {
   if (sofaCache.has(endpoint)) return; // already cached
@@ -2340,7 +2351,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.get("/api/event/:eventId", async (req: Request, res: Response) => {
     try {
-      const data = await fetchSofaScore(`/event/${req.params.eventId}`);
+      const data = await fetchSofaScoreOptional(`/event/${req.params.eventId}`);
+      if (!data) return res.status(404).json({ error: "Event not found" });
       res.json(data);
     } catch (error: any) {
       res.status(500).json({ error: error.message });
@@ -2351,10 +2363,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
     "/api/event/:eventId/incidents",
     async (req: Request, res: Response) => {
       try {
-        const data = await fetchSofaScore(
+        const data = await fetchSofaScoreOptional(
           `/event/${req.params.eventId}/incidents`,
         );
-        res.json(data);
+        res.json(data ?? { incidents: [] });
       } catch (error: any) {
         res.status(500).json({ error: error.message });
       }
@@ -4111,10 +4123,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
     "/api/event/:eventId/statistics",
     async (req: Request, res: Response) => {
       try {
-        const data = await fetchSofaScore(
+        const data = await fetchSofaScoreOptional(
           `/event/${req.params.eventId}/statistics`,
         );
-        res.json(injectCustomXGIntoStatistics(data));
+        res.json(data ? injectCustomXGIntoStatistics(data) : { statistics: [] });
       } catch (error: any) {
         res.status(500).json({ error: error.message });
       }
@@ -4125,10 +4137,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
     "/api/event/:eventId/best-players",
     async (req: Request, res: Response) => {
       try {
-        const data = await fetchSofaScore(
+        const data = await fetchSofaScoreOptional(
           `/event/${req.params.eventId}/best-players`,
         );
-        res.json(data);
+        res.json(data ?? { bestPlayers: [] });
       } catch (error: any) {
         res.status(500).json({ error: error.message });
       }
@@ -4139,10 +4151,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
     "/api/event/:eventId/h2h/events",
     async (req: Request, res: Response) => {
       try {
-        const data = await fetchSofaScore(
+        const data = await fetchSofaScoreOptional(
           `/event/${req.params.eventId}/h2h/events`,
         );
-        res.json(data);
+        res.json(data ?? { events: [] });
       } catch (error: any) {
         res.status(500).json({ error: error.message });
       }
@@ -4153,10 +4165,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
     "/api/event/:eventId/odds/1/all",
     async (req: Request, res: Response) => {
       try {
-        const data = await fetchSofaScore(
+        const data = await fetchSofaScoreOptional(
           `/event/${req.params.eventId}/odds/1/all`,
         );
-        res.json(data);
+        res.json(data ?? { markets: [] });
       } catch (error: any) {
         res.status(500).json({ error: error.message });
       }
@@ -4168,10 +4180,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
     async (req: Request, res: Response) => {
       try {
         const { tournamentId, seasonId } = req.params;
-        const data = await fetchSofaScore(
+        const data = await fetchSofaScoreOptional(
           `/unique-tournament/${tournamentId}/season/${seasonId}/standings/total`,
         );
-        res.json(data);
+        res.json(data ?? { standings: [] });
       } catch (error: any) {
         res.status(500).json({ error: error.message });
       }
@@ -4183,10 +4195,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
     async (req: Request, res: Response) => {
       try {
         const { teamId, page } = req.params;
-        const data = await fetchSofaScore(
+        const data = await fetchSofaScoreOptional(
           `/team/${teamId}/events/last/${page}`,
         );
-        res.json(data);
+        res.json(data ?? { events: [] });
       } catch (error: any) {
         res.status(500).json({ error: error.message });
       }
@@ -4421,8 +4433,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
         });
         res.json(ctx);
       } catch (error: any) {
-        console.error("half-context error:", error?.message);
-        res.status(500).json({ error: error?.message || "Failed to compute half context" });
+        const msg = error?.message || "Failed to compute half context";
+        console.error("half-context error:", msg);
+        if (msg.includes("404")) return res.json({ signals: [], context: {} });
+        res.status(500).json({ error: msg });
       }
     },
   );
