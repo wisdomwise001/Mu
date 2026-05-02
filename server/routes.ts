@@ -2,6 +2,7 @@ import type { Express, Request, Response } from "express";
 import { createServer, type Server } from "node:http";
 import fs from "node:fs";
 import path from "node:path";
+import pLimit from "p-limit";
 import OpenAI from "openai";
 import db from "./db";
 import engine, { extractFeatures, FEATURE_NAMES } from "./xgEngine";
@@ -6020,12 +6021,14 @@ Format with clear markdown headings (### for sections). Keep it punchy but thoro
       const serverPort = process.env.PORT || 5000;
       const baseUrl = `http://localhost:${serverPort}`;
 
+      // Process up to 4 matches concurrently — the shared in-memory cache
+      // deduplicates overlapping SofaScore calls across concurrent matches.
+      const limit = pLimit(4);
+
       (async () => {
-        for (const event of finishedEvents) {
-          if (job.cancelRequested) {
-            job.status = "cancelled";
-            break;
-          }
+        const tasks = finishedEvents.map((event) =>
+          limit(async () => {
+            if (job.cancelRequested) return;
 
           const eventId = event.id;
           const homeTeamId = event.homeTeam?.id;
@@ -6043,7 +6046,7 @@ Format with clear markdown headings (### for sections). Keep it punchy but thoro
             job.skipped++;
             job.processed++;
             job.log.push(`⏭ Skipped (already stored): ${homeTeamName} vs ${awayTeamName}`);
-            continue;
+            return;
           }
 
           const homeScore = event.homeScore?.current ?? event.homeScore?.display ?? null;
@@ -6052,7 +6055,7 @@ Format with clear markdown headings (### for sections). Keep it punchy but thoro
             job.skipped++;
             job.processed++;
             job.log.push(`⏭ Skipped (no score): ${homeTeamName} vs ${awayTeamName}`);
-            continue;
+            return;
           }
 
           const hGoals = Number(homeScore);
@@ -6064,8 +6067,8 @@ Format with clear markdown headings (### for sections). Keep it punchy but thoro
           const aHtGoals = event.awayScore?.period1 != null ? Number(event.awayScore.period1) : null;
 
           try {
-            // Anti-blocking: 2.5s delay between each match
-            await sleep(2500);
+            // Small stagger to spread proxy usage across concurrent batches
+            await sleep(Math.floor(Math.random() * 300));
 
             const simRes = await fetch(
               `${baseUrl}/api/event/${eventId}/player-simulation?homeTeamId=${homeTeamId}&awayTeamId=${awayTeamId}`,
@@ -6116,7 +6119,7 @@ Format with clear markdown headings (### for sections). Keep it punchy but thoro
               job.skipped++;
               job.processed++;
               job.log.push(`⏭ Skipped (incomplete stats — missing: ${missingStats.slice(0, 3).join(", ")}${missingStats.length > 3 ? ` +${missingStats.length - 3} more` : ""}): ${homeTeamName} vs ${awayTeamName}`);
-              continue;
+              return;
             }
 
             // ── Injury / suspension data ─────────────────────────────────────
@@ -6262,68 +6265,71 @@ Format with clear markdown headings (### for sections). Keep it punchy but thoro
               `).run(bucketId, scoreSum, scoreAbsDiff, eventId);
             } catch {}
 
-            try {
-              const ctx = await computeHalfContext(eventId);
+            // Fire-and-forget: computeHalfContext runs in the background and
+            // does NOT block the next concurrent match from starting.
+            computeHalfContext(eventId).then((ctx) => {
               const c = ctx.context;
               const sigFirst = ctx.signals.filter((s: any) => s.leans === "first").reduce((acc: number, s: any) => acc + s.weight, 0);
               const sigSecond = ctx.signals.filter((s: any) => s.leans === "second").reduce((acc: number, s: any) => acc + s.weight, 0);
               const sigDraw = ctx.signals.filter((s: any) => s.leans === "draw").reduce((acc: number, s: any) => acc + s.weight, 0);
-              db.prepare(`
-                UPDATE match_simulations SET
-                  ctx_is_knockout = ?, ctx_knockout_stage = ?, ctx_is_second_leg = ?,
-                  ctx_agg_lead_goals = ?, ctx_trailing_needs_goals = ?,
-                  ctx_home_motivation = ?, ctx_away_motivation = ?, ctx_motivation_asymmetry = ?,
-                  ctx_home_pressure_status = ?, ctx_away_pressure_status = ?,
-                  ctx_home_fatigue_index = ?, ctx_away_fatigue_index = ?, ctx_fatigue_asymmetry = ?,
-                  ctx_home_avg_first_sub = ?, ctx_away_avg_first_sub = ?,
-                  ctx_home_late_subs_rate = ?, ctx_away_late_subs_rate = ?,
-                  ctx_home_conservative_coach = ?, ctx_away_conservative_coach = ?,
-                  ctx_style_clash_lean = ?, ctx_style_clash_weight = ?,
-                  ctx_odds_home_win = ?, ctx_odds_draw = ?, ctx_odds_away_win = ?,
-                  ctx_odds_favorite = ?, ctx_odds_gap = ?,
-                  ctx_stage_label = ?, ctx_stage_modifier = ?,
-                  ctx_signal_count = ?, ctx_signal_first_weight = ?,
-                  ctx_signal_second_weight = ?, ctx_signal_draw_weight = ?
-                WHERE event_id = ?
-              `).run(
-                c.knockout?.isKnockout ? 1 : 0,
-                c.knockout?.stage ?? null,
-                c.knockout?.isSecondLeg ? 1 : 0,
-                c.knockout?.aggregateLead ?? null,
-                c.knockout?.trailingNeedsGoals ?? null,
-                c.pressure?.home?.motivation ?? null,
-                c.pressure?.away?.motivation ?? null,
-                c.pressure?.asymmetry ?? null,
-                c.pressure?.home?.status ?? null,
-                c.pressure?.away?.status ?? null,
-                c.fatigue?.home?.fatigueIndex ?? null,
-                c.fatigue?.away?.fatigueIndex ?? null,
-                c.fatigue?.asymmetry ?? null,
-                c.subPatterns?.home?.avgFirstSubMinute ?? null,
-                c.subPatterns?.away?.avgFirstSubMinute ?? null,
-                c.subPatterns?.home?.lateSubsRate ?? null,
-                c.subPatterns?.away?.lateSubsRate ?? null,
-                c.subPatterns?.home?.conservative ? 1 : 0,
-                c.subPatterns?.away?.conservative ? 1 : 0,
-                c.styleClash?.lean ?? null,
-                c.styleClash ? 0.5 : 0,
-                c.odds?.homeWin ?? null,
-                c.odds?.draw ?? null,
-                c.odds?.awayWin ?? null,
-                c.odds?.favorite ?? null,
-                c.odds?.gap ?? null,
-                c.stage?.label ?? null,
-                c.stage?.modifier ?? null,
-                ctx.signals.length,
-                sigFirst,
-                sigSecond,
-                sigDraw,
-                eventId,
-              );
-            } catch (ctxErr: any) {
-              // Context is optional — log but don't fail the upload
+              try {
+                db.prepare(`
+                  UPDATE match_simulations SET
+                    ctx_is_knockout = ?, ctx_knockout_stage = ?, ctx_is_second_leg = ?,
+                    ctx_agg_lead_goals = ?, ctx_trailing_needs_goals = ?,
+                    ctx_home_motivation = ?, ctx_away_motivation = ?, ctx_motivation_asymmetry = ?,
+                    ctx_home_pressure_status = ?, ctx_away_pressure_status = ?,
+                    ctx_home_fatigue_index = ?, ctx_away_fatigue_index = ?, ctx_fatigue_asymmetry = ?,
+                    ctx_home_avg_first_sub = ?, ctx_away_avg_first_sub = ?,
+                    ctx_home_late_subs_rate = ?, ctx_away_late_subs_rate = ?,
+                    ctx_home_conservative_coach = ?, ctx_away_conservative_coach = ?,
+                    ctx_style_clash_lean = ?, ctx_style_clash_weight = ?,
+                    ctx_odds_home_win = ?, ctx_odds_draw = ?, ctx_odds_away_win = ?,
+                    ctx_odds_favorite = ?, ctx_odds_gap = ?,
+                    ctx_stage_label = ?, ctx_stage_modifier = ?,
+                    ctx_signal_count = ?, ctx_signal_first_weight = ?,
+                    ctx_signal_second_weight = ?, ctx_signal_draw_weight = ?
+                  WHERE event_id = ?
+                `).run(
+                  c.knockout?.isKnockout ? 1 : 0,
+                  c.knockout?.stage ?? null,
+                  c.knockout?.isSecondLeg ? 1 : 0,
+                  c.knockout?.aggregateLead ?? null,
+                  c.knockout?.trailingNeedsGoals ?? null,
+                  c.pressure?.home?.motivation ?? null,
+                  c.pressure?.away?.motivation ?? null,
+                  c.pressure?.asymmetry ?? null,
+                  c.pressure?.home?.status ?? null,
+                  c.pressure?.away?.status ?? null,
+                  c.fatigue?.home?.fatigueIndex ?? null,
+                  c.fatigue?.away?.fatigueIndex ?? null,
+                  c.fatigue?.asymmetry ?? null,
+                  c.subPatterns?.home?.avgFirstSubMinute ?? null,
+                  c.subPatterns?.away?.avgFirstSubMinute ?? null,
+                  c.subPatterns?.home?.lateSubsRate ?? null,
+                  c.subPatterns?.away?.lateSubsRate ?? null,
+                  c.subPatterns?.home?.conservative ? 1 : 0,
+                  c.subPatterns?.away?.conservative ? 1 : 0,
+                  c.styleClash?.lean ?? null,
+                  c.styleClash ? 0.5 : 0,
+                  c.odds?.homeWin ?? null,
+                  c.odds?.draw ?? null,
+                  c.odds?.awayWin ?? null,
+                  c.odds?.favorite ?? null,
+                  c.odds?.gap ?? null,
+                  c.stage?.label ?? null,
+                  c.stage?.modifier ?? null,
+                  ctx.signals.length,
+                  sigFirst,
+                  sigSecond,
+                  sigDraw,
+                  eventId,
+                );
+              } catch { /* best-effort ctx update */ }
+            }).catch((ctxErr: any) => {
+              // Context enrichment is optional — silently ignore failures
               job.log.push(`   ↳ ctx skipped (${ctxErr.message?.slice(0, 60) || "error"})`);
-            }
+            });
 
             job.log.push(`✅ Stored: ${homeTeamName} ${hGoals}-${aGoals} ${awayTeamName} [${bucketId ?? "out-of-range"}] (${tournament})${injuryNote}`);
           } catch (err: any) {
@@ -6332,8 +6338,10 @@ Format with clear markdown headings (### for sections). Keep it punchy but thoro
           }
 
           job.processed++;
-        }
+          })  // close limit(async () => {
+        );   // close .map(
 
+        await Promise.all(tasks);
         if (job.status !== "cancelled") job.status = "completed";
       })();
 
