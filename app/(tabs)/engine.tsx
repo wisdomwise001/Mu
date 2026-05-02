@@ -109,6 +109,7 @@ export default function EngineScreen() {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [selectedBucket, setSelectedBucket] = useState<string | null>(null);
   const [outcomePolling, setOutcomePolling] = useState(false);
+  const [hshPolling, setHshPolling] = useState(false);
   const webTop = Platform.OS === "web" ? 67 : 0;
   const webBottom = Platform.OS === "web" ? 84 : 0;
 
@@ -233,6 +234,39 @@ export default function EngineScreen() {
   }, [selectedBucket, trainOutcomeMutation]);
 
   const isOutcomeTraining = outcomePolling && outcomeProgress?.running;
+
+  // ── HSH model ─────────────────────────────────────────────────────────────
+  const { data: hshStatus, refetch: refetchHshStatus } = useQuery<any>({
+    queryKey: ["/api/engine/hsh-status"],
+  });
+
+  const { data: hshProgress } = useQuery<any>({
+    queryKey: ["/api/engine/hsh-train-progress"],
+    refetchInterval: hshPolling ? 1500 : false,
+    enabled: hshPolling,
+  });
+
+  useEffect(() => {
+    if (hshProgress !== undefined && hshProgress.running === false && hshPolling) {
+      setHshPolling(false);
+      refetchHshStatus();
+      queryClient.invalidateQueries({ queryKey: ["/api/engine/hsh-status"] });
+    }
+  }, [hshProgress, hshPolling]);
+
+  const trainHSHMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/engine/train-hsh");
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.removeQueries({ queryKey: ["/api/engine/hsh-train-progress"] });
+      setHshPolling(true);
+    },
+    onError: (err: Error) => Alert.alert("HSH Training Error", err.message, [{ text: "OK" }]),
+  });
+
+  const isHSHTraining = hshPolling && hshProgress?.running;
 
   const isTraining = polling && progress?.running;
   const trainingProgress = progress?.progress ?? 0;
@@ -481,6 +515,81 @@ export default function EngineScreen() {
         )}
       </View>
 
+      {/* ── Highest-Scoring-Half (HSH) Model ─────────────────────────────── */}
+      <View style={styles.hshSection}>
+        <Text style={styles.sectionTitle}>Highest-Scoring Half (HSH)</Text>
+        <Text style={styles.sectionSubtitle}>
+          Predicts whether the 1st half, 2nd half, or neither scores more goals.
+          Uses per-half stats (goals, xG, shots, big chances) plus 8 situational context signals:
+          motivation, fatigue, coach style, odds gap, knockout stage and more.
+        </Text>
+
+        {/* Status + class distribution */}
+        <View style={styles.hshStatusRow}>
+          <View style={[styles.statusBadge, { backgroundColor: hshStatus?.trained ? "#16a34a22" : "#71717a22" }]}>
+            <View style={[styles.statusDot, { backgroundColor: hshStatus?.trained ? "#4ade80" : "#71717a" }]} />
+            <Text style={[styles.statusText, { color: hshStatus?.trained ? "#4ade80" : "#9ca3af" }]}>
+              {hshStatus?.trained ? "Trained" : "Untrained"}
+            </Text>
+          </View>
+          {hshStatus?.trained && (
+            <Text style={styles.hshAccText}>
+              Acc {(hshStatus.trainAccuracy * 100).toFixed(1)}%  ·  n={hshStatus.sampleCount}
+            </Text>
+          )}
+        </View>
+
+        {hshStatus?.trained && (
+          <View style={styles.hshClassRow}>
+            {[
+              { label: "1st Half",  count: hshStatus.classCounts?.first  ?? 0, color: "#3D7BF4" },
+              { label: "2nd Half",  count: hshStatus.classCounts?.second ?? 0, color: "#f59e0b" },
+              { label: "Equal",     count: hshStatus.classCounts?.draw   ?? 0, color: "#71717a" },
+            ].map((c) => (
+              <View key={c.label} style={styles.hshClassItem}>
+                <Text style={[styles.hshClassValue, { color: c.color }]}>{c.count}</Text>
+                <Text style={styles.hshClassLabel}>{c.label}</Text>
+              </View>
+            ))}
+          </View>
+        )}
+
+        {/* Training progress */}
+        {isHSHTraining && (
+          <View style={styles.outcomeProgress}>
+            <View style={styles.progressBarBg}>
+              <View style={[styles.progressBarFill, { width: `${hshProgress?.progress ?? 0}%` }]} />
+            </View>
+            <Text style={styles.outcomeProgressMsg}>{hshProgress?.message ?? "Training…"}</Text>
+          </View>
+        )}
+
+        {hshProgress?.error && !isHSHTraining && (
+          <Text style={styles.outcomeError}>Error: {hshProgress.error}</Text>
+        )}
+
+        <TouchableOpacity
+          style={[styles.trainOutcomeBtn, (isHSHTraining || trainHSHMutation.isPending) && styles.trainOutcomeBtnDisabled]}
+          onPress={() => trainHSHMutation.mutate()}
+          disabled={isHSHTraining || trainHSHMutation.isPending}
+        >
+          {isHSHTraining || trainHSHMutation.isPending ? (
+            <ActivityIndicator size="small" color="#fff" />
+          ) : (
+            <>
+              <Ionicons name="analytics" size={16} color="#fff" />
+              <Text style={styles.trainOutcomeBtnText}>
+                {hshStatus?.trained ? "Retrain HSH Model" : "Train HSH Model"}
+              </Text>
+            </>
+          )}
+        </TouchableOpacity>
+
+        {hshStatus?.trained && !isHSHTraining && (
+          <Text style={styles.hshTrainedAt}>Last trained: {formatDate(hshStatus.trainedAt)}</Text>
+        )}
+      </View>
+
       <View style={styles.architectureSection}>
         <Text style={styles.sectionTitle}>Engine Architecture</Text>
         <Text style={styles.sectionSubtitle}>
@@ -675,4 +784,17 @@ const styles = StyleSheet.create({
     fontSize: 11, fontFamily: Platform.select({ ios: "Menlo", android: "monospace", default: "monospace" }),
     color: "#cbd5e1", lineHeight: 18,
   },
+
+  // HSH section
+  hshSection: { marginBottom: 24 },
+  hshStatusRow: { flexDirection: "row", alignItems: "center", gap: 10, marginBottom: 12 },
+  hshAccText: { fontSize: 12, fontFamily: "Inter_500Medium", color: Colors.dark.textSecondary },
+  hshClassRow: { flexDirection: "row", gap: 8, marginBottom: 14 },
+  hshClassItem: {
+    flex: 1, backgroundColor: Colors.dark.surface, borderRadius: 10, padding: 10,
+    alignItems: "center", borderWidth: 1, borderColor: Colors.dark.border,
+  },
+  hshClassValue: { fontSize: 20, fontFamily: "Inter_700Bold" },
+  hshClassLabel: { fontSize: 10, fontFamily: "Inter_400Regular", color: Colors.dark.textSecondary, marginTop: 2 },
+  hshTrainedAt: { fontSize: 11, fontFamily: "Inter_400Regular", color: Colors.dark.textTertiary, textAlign: "center", marginTop: 8 },
 });

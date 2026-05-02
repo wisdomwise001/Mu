@@ -15,6 +15,13 @@ import {
   type TrainedOutcomeModel,
   type BucketPrediction,
 } from "./scoreOutcomeTrainer";
+import {
+  trainHSH,
+  loadHSHModel,
+  predictHSH,
+  buildHSHFeatureVector,
+  type HSHPrediction,
+} from "./halfScoringTrainer";
 import { proxyFetch, reloadProxies, getProxyStats } from "./proxyFetch";
 import { scrapeGeonodeProxies } from "./proxyScraper";
 
@@ -5066,6 +5073,10 @@ Format with clear markdown headings (### for sections). Keep it punchy but thoro
     result: null,
   };
 
+  // ── HSH training state ────────────────────────────────────────────────────
+  type HSHTrainState = { running: boolean; progress: number; message: string; error: string | null };
+  const hshTrainState: HSHTrainState = { running: false, progress: 0, message: "", error: null };
+
   app.get("/api/engine/outcome-buckets", (_req: Request, res: Response) => {
     // Return all buckets with sample counts and trained-model summary
     const trained: any[] = db.prepare(`
@@ -5454,6 +5465,208 @@ Format with clear markdown headings (### for sections). Keep it punchy but thoro
     } catch (err: any) {
       console.error("[outcome-predict] error:", err.message);
       res.status(500).json({ error: err.message || "Prediction failed" });
+    }
+  });
+
+  // ── HSH (Highest-Scoring-Half) routes ──────────────────────────────────────
+  app.get("/api/engine/hsh-status", (_req: Request, res: Response) => {
+    const row: any = db.prepare(
+      "SELECT sample_count, train_accuracy, formula, trained_at FROM engine_hsh_model WHERE id = 1"
+    ).get();
+    if (!row) return res.json({ trained: false });
+    const counts: any = db.prepare(`
+      SELECT
+        COUNT(*) AS total,
+        SUM(CASE WHEN (home_ht_goals + away_ht_goals) >
+                      ((home_goals - home_ht_goals) + (away_goals - away_ht_goals)) THEN 1 ELSE 0 END) AS first_count,
+        SUM(CASE WHEN (home_ht_goals + away_ht_goals) <
+                      ((home_goals - home_ht_goals) + (away_goals - away_ht_goals)) THEN 1 ELSE 0 END) AS second_count,
+        SUM(CASE WHEN (home_ht_goals + away_ht_goals) =
+                      ((home_goals - home_ht_goals) + (away_goals - away_ht_goals)) THEN 1 ELSE 0 END) AS draw_count
+      FROM match_simulations
+      WHERE home_ht_goals IS NOT NULL AND away_ht_goals IS NOT NULL
+        AND home_goals IS NOT NULL AND away_goals IS NOT NULL
+    `).get();
+    res.json({
+      trained: true,
+      sampleCount: row.sample_count,
+      trainAccuracy: row.train_accuracy,
+      trainedAt: row.trained_at,
+      formula: row.formula,
+      dbTotal: counts?.total ?? 0,
+      classCounts: {
+        first:  counts?.first_count  ?? 0,
+        second: counts?.second_count ?? 0,
+        draw:   counts?.draw_count   ?? 0,
+      },
+    });
+  });
+
+  app.get("/api/engine/hsh-train-progress", (_req: Request, res: Response) => {
+    res.json({
+      running:  hshTrainState.running,
+      progress: hshTrainState.progress,
+      message:  hshTrainState.message,
+      error:    hshTrainState.error,
+    });
+  });
+
+  app.post("/api/engine/train-hsh", async (req: Request, res: Response) => {
+    if (hshTrainState.running) {
+      return res.status(409).json({ error: "HSH training already in progress." });
+    }
+    hshTrainState.running  = true;
+    hshTrainState.progress = 0;
+    hshTrainState.message  = "Starting…";
+    hshTrainState.error    = null;
+    res.json({ started: true });
+
+    try {
+      await trainHSH({
+        onProgress: (pct, msg) => {
+          hshTrainState.progress = pct;
+          hshTrainState.message  = msg;
+        },
+      });
+      hshTrainState.message = "Training complete.";
+    } catch (err: any) {
+      hshTrainState.error   = err.message || String(err);
+      hshTrainState.message = `Failed: ${hshTrainState.error}`;
+    } finally {
+      hshTrainState.running  = false;
+      hshTrainState.progress = 100;
+    }
+  });
+
+  app.get("/api/engine/hsh-predict/:eventId", async (req: Request, res: Response) => {
+    try {
+      const model = loadHSHModel();
+      if (!model) {
+        return res.status(400).json({
+          error: "No HSH model trained yet. Go to the Engine tab and train the Highest-Scoring-Half model first.",
+        });
+      }
+
+      const eventId   = Number(req.params.eventId);
+      const dbRow: any = db.prepare(
+        "SELECT * FROM match_simulations WHERE event_id = ?"
+      ).get(eventId);
+
+      // If the match is already in the DB (bulk-uploaded) use stored features —
+      // they include ctx_* context already computed at upload time.
+      if (dbRow && dbRow.home_h1_avg_goals_scored != null) {
+        const prediction = predictHSH(dbRow, model);
+        return res.json({
+          eventId, source: "database",
+          ...prediction,
+          modelAccuracy: model.trainAccuracy,
+          sampleCount:   model.sampleCount,
+          trainedAt:     model.trainedAt,
+        });
+      }
+
+      // Otherwise fetch live simulation + half-context
+      const homeTeamId = Number(req.query.homeTeamId) || dbRow?.home_team_id;
+      const awayTeamId = Number(req.query.awayTeamId) || dbRow?.away_team_id;
+      if (!homeTeamId || !awayTeamId) {
+        return res.status(400).json({
+          error: "homeTeamId and awayTeamId are required (or bulk-upload the match first).",
+        });
+      }
+
+      const serverPort = process.env.PORT || 5000;
+      const baseUrl    = `http://localhost:${serverPort}`;
+
+      const simRes = await fetch(
+        `${baseUrl}/api/event/${eventId}/player-simulation?homeTeamId=${homeTeamId}&awayTeamId=${awayTeamId}`,
+        { signal: AbortSignal.timeout(90000) }
+      );
+      if (!simRes.ok) {
+        return res.status(502).json({ error: "Could not fetch live match data for HSH prediction." });
+      }
+
+      const sim: any  = await simRes.json();
+      const h         = sim.home;
+      const a         = sim.away;
+      const hStats    = h?.teamMatchStats?.all;
+      const hStats1h  = h?.teamMatchStats?.firstHalf;
+      const hStats2h  = h?.teamMatchStats?.secondHalf;
+      const aStats    = a?.teamMatchStats?.all;
+      const aStats1h  = a?.teamMatchStats?.firstHalf;
+      const aStats2h  = a?.teamMatchStats?.secondHalf;
+
+      let ctx: any = {};
+      try {
+        const ctxRes = await fetch(
+          `${baseUrl}/api/event/${eventId}/half-context`,
+          { signal: AbortSignal.timeout(30000) }
+        );
+        if (ctxRes.ok) ctx = await ctxRes.json();
+      } catch { /* ctx stays empty — HSH features default to 0 */ }
+
+      const row: Record<string, any> = {
+        home_h1_avg_goals_scored:    hStats1h?.avgGoalsScored   ?? 0,
+        home_h1_avg_xg:              hStats1h?.avgXg            ?? 0,
+        home_h1_avg_total_shots:     hStats1h?.avgTotalShots    ?? 0,
+        home_h1_avg_big_chances:     hStats1h?.avgBigChances    ?? 0,
+        home_h1_avg_pass_accuracy:   hStats1h?.avgPassAccuracy  ?? 0,
+        home_h2_avg_goals_scored:    hStats2h?.avgGoalsScored   ?? 0,
+        home_h2_avg_xg:              hStats2h?.avgXg            ?? 0,
+        home_h2_avg_total_shots:     hStats2h?.avgTotalShots    ?? 0,
+        home_h2_avg_big_chances:     hStats2h?.avgBigChances    ?? 0,
+        home_h2_avg_pass_accuracy:   hStats2h?.avgPassAccuracy  ?? 0,
+        away_h1_avg_goals_scored:    aStats1h?.avgGoalsScored   ?? 0,
+        away_h1_avg_xg:              aStats1h?.avgXg            ?? 0,
+        away_h1_avg_total_shots:     aStats1h?.avgTotalShots    ?? 0,
+        away_h1_avg_big_chances:     aStats1h?.avgBigChances    ?? 0,
+        away_h1_avg_pass_accuracy:   aStats1h?.avgPassAccuracy  ?? 0,
+        away_h2_avg_goals_scored:    aStats2h?.avgGoalsScored   ?? 0,
+        away_h2_avg_xg:              aStats2h?.avgXg            ?? 0,
+        away_h2_avg_total_shots:     aStats2h?.avgTotalShots    ?? 0,
+        away_h2_avg_big_chances:     aStats2h?.avgBigChances    ?? 0,
+        away_h2_avg_pass_accuracy:   aStats2h?.avgPassAccuracy  ?? 0,
+        home_form_strength:          h?.formStrength            ?? 0,
+        home_scoring_strength:       h?.scoringStrength         ?? 0,
+        home_defending_strength:     h?.defendingStrength       ?? 0,
+        away_form_strength:          a?.formStrength            ?? 0,
+        away_scoring_strength:       a?.scoringStrength         ?? 0,
+        away_defending_strength:     a?.defendingStrength       ?? 0,
+        home_avg_goals_scored:       hStats?.avgGoalsScored     ?? 0,
+        home_avg_xg:                 hStats?.avgXg              ?? 0,
+        away_avg_goals_scored:       aStats?.avgGoalsScored     ?? 0,
+        away_avg_xg:                 aStats?.avgXg              ?? 0,
+        ctx_signal_first_weight:     ctx.signalFirstWeight      ?? 0,
+        ctx_signal_second_weight:    ctx.signalSecondWeight     ?? 0,
+        ctx_signal_draw_weight:      ctx.signalDrawWeight       ?? 0,
+        ctx_is_knockout:             ctx.isKnockout             ?? 0,
+        ctx_is_second_leg:           ctx.isSecondLeg            ?? 0,
+        ctx_trailing_needs_goals:    ctx.trailingNeedsGoals     ?? 0,
+        ctx_home_motivation:         ctx.homeMotivation         ?? 0,
+        ctx_away_motivation:         ctx.awayMotivation         ?? 0,
+        ctx_motivation_asymmetry:    ctx.motivationAsymmetry    ?? 0,
+        ctx_home_fatigue_index:      ctx.homeFatigueIndex       ?? 0,
+        ctx_away_fatigue_index:      ctx.awayFatigueIndex       ?? 0,
+        ctx_fatigue_asymmetry:       ctx.fatigueAsymmetry       ?? 0,
+        ctx_home_conservative_coach: ctx.homeConservativeCoach  ?? 0,
+        ctx_away_conservative_coach: ctx.awayConservativeCoach  ?? 0,
+        ctx_home_late_subs_rate:     ctx.homeLateSubsRate       ?? 0,
+        ctx_away_late_subs_rate:     ctx.awayLateSubsRate       ?? 0,
+        ctx_odds_gap:                ctx.oddsGap                ?? 0,
+        ctx_stage_modifier:          ctx.stageModifier          ?? 0,
+        ctx_style_clash_weight:      ctx.styleClashWeight       ?? 0,
+      };
+
+      const prediction = predictHSH(row, model);
+      res.json({
+        eventId, source: "live",
+        ...prediction,
+        modelAccuracy: model.trainAccuracy,
+        sampleCount:   model.sampleCount,
+        trainedAt:     model.trainedAt,
+      });
+    } catch (err: any) {
+      console.error("[hsh-predict] error:", err.message);
+      res.status(500).json({ error: err.message || "HSH prediction failed" });
     }
   });
 

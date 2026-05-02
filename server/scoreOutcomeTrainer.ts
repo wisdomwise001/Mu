@@ -610,15 +610,31 @@ export function predictAllBuckets(
     // Distance from this model's own prediction to its target (sum, diff space).
     // A model that predicts exactly (3, 1) for a 2-1/1-2 bucket gets distance=0.
     const dist = Math.sqrt((fs - m.targetSum) ** 2 + (fd - m.targetDiff) ** 2);
-    // Sharper decay (denominator 0.5) so only predictions very close to target score high.
-    const rawScore = Math.exp(-(dist * dist) / 0.5);
-    return { m, fs, fd, roundedSum, roundedDiff, isExactHit, rawScore };
+    return { m, fs, fd, roundedSum, roundedDiff, isExactHit, dist };
   });
 
-  // Softmax-normalise raw scores → confidence percentages
-  const totalScore = raw.reduce((s, r) => s + r.rawScore, 0) || 1;
+  // ── Relative confidence scoring ───────────────────────────────────────────
+  // Problem with the old Gaussian scoring (exp(-d²/σ)):
+  //   When all models predict roughly equal distances (common with limited training
+  //   data), every raw score is similar and softmax produces near-equal confidences
+  //   like 39% / 38% — the user can't tell which bucket the model actually prefers.
+  //
+  // Fix: score each model relative to the BEST model (smallest distance).
+  //   rawScore = exp(-((dist - minDist) / SIGMA_REL)²)
+  //   The best model always scores 1.0.  A model 0.3 away from the best scores
+  //   exp(-(0.3/0.2)²) ≈ 0.11 — creating a clear spread even for small differences.
+  //   Additionally, an absolute quality gate (exp(-dist²/0.3)) prevents a poorly
+  //   predicting leader from receiving artificially high confidence.
+  const SIGMA_REL = 0.20;
+  const minDist = Math.min(...raw.map((r) => r.dist));
+  const scored = raw.map((r) => {
+    const relScore = Math.exp(-Math.pow((r.dist - minDist) / SIGMA_REL, 2));
+    const absScore = Math.exp(-(r.dist * r.dist) / 0.3);  // hard quality gate
+    return { ...r, rawScore: relScore * absScore };
+  });
+  const totalScore = scored.reduce((s, r) => s + r.rawScore, 0) || 1;
 
-  const predictions: BucketPrediction[] = raw.map(({ m, fs, fd, roundedSum, roundedDiff, isExactHit, rawScore }) => ({
+  const predictions: BucketPrediction[] = scored.map(({ m, fs, fd, roundedSum, roundedDiff, isExactHit, rawScore }) => ({
     bucketId: m.bucketId,
     label: m.label,
     scores: SCORE_BUCKETS.find((b) => b.id === m.bucketId)?.scores ?? [],

@@ -313,6 +313,20 @@ col("score_bucket",             "TEXT");      // e.g. "0-0", "1-0/0-1", "1-1"
 col("score_sum",                "INTEGER");
 col("score_abs_diff",           "INTEGER");
 
+// ── HSH (Highest-Scoring-Half) model storage ──────────────────────────────
+// Single-row table (id=1) storing the latest trained multinomial logistic
+// regression model for first / second / draw half predictions.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS engine_hsh_model (
+    id             INTEGER PRIMARY KEY,   -- always 1
+    weights        TEXT    NOT NULL,      -- JSON: {weights,biases,normMean,normStd,featureNames,classCounts}
+    sample_count   INTEGER NOT NULL,
+    train_accuracy REAL    NOT NULL,
+    formula        TEXT    NOT NULL,
+    trained_at     TEXT    NOT NULL
+  )
+`);
+
 // ── Per-outcome model storage ──────────────────────────────────────────────
 // Each row = one trained model for one of the 15 score buckets.
 // Weights stored as JSON: { sum: number[], diff: number[], featureNames: string[],

@@ -52,6 +52,24 @@ interface OutcomePredictResponse {
   allScorelinesRanked: ScoреlinePrediction[];
 }
 
+interface HSHPredictResponse {
+  eventId: number;
+  source: "database" | "live";
+  prediction: "first" | "second" | "draw";
+  confidence: number;
+  probs: { first: number; second: number; draw: number };
+  keyFactors: {
+    feature: string;
+    label: string;
+    contribution: number;
+    direction: "+" | "-";
+    pushesTo: "first" | "second" | "draw";
+  }[];
+  modelAccuracy: number;
+  sampleCount: number;
+  trainedAt: string;
+}
+
 const OUTCOME_META: Record<
   "Home Win" | "Away Win" | "Draw",
   { icon: string; color: string }
@@ -245,6 +263,181 @@ function AllScorelinesSection({
   );
 }
 
+// ── HSH Section ───────────────────────────────────────────────────────────────
+const HSH_COLORS: Record<string, string> = {
+  first:  "#3D7BF4",
+  second: "#f59e0b",
+  draw:   "#71717a",
+};
+const HSH_LABELS_MAP: Record<string, string> = {
+  first:  "1st Half",
+  second: "2nd Half",
+  draw:   "Equal",
+};
+
+function HSHBar({
+  label, pct, color, isWinner, delay,
+}: { label: string; pct: number; color: string; isWinner: boolean; delay: number }) {
+  const anim = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    Animated.timing(anim, { toValue: pct, duration: 800, delay, useNativeDriver: false }).start();
+  }, [pct, delay]);
+  const width = anim.interpolate({ inputRange: [0, 100], outputRange: ["0%", "100%"] });
+  return (
+    <View style={[hshStyles.hshRow, isWinner && { backgroundColor: color + "11" }]}>
+      <Text style={[hshStyles.hshLabel, isWinner && { color, fontFamily: "Inter_700Bold" }]}>{label}</Text>
+      <View style={hshStyles.hshTrack}>
+        <Animated.View style={[hshStyles.hshFill, { width, backgroundColor: color }]} />
+      </View>
+      <Text style={[hshStyles.hshPct, { color: isWinner ? color : Colors.dark.textSecondary }]}>
+        {pct.toFixed(1)}%
+      </Text>
+      {isWinner && <Ionicons name="trophy" size={12} color={color} />}
+    </View>
+  );
+}
+
+function HSHSection({
+  eventId,
+  homeTeamId,
+  awayTeamId,
+  canFetch,
+}: {
+  eventId: string;
+  homeTeamId?: number;
+  awayTeamId?: number;
+  canFetch: boolean;
+}) {
+  const [showFactors, setShowFactors] = useState(false);
+
+  const queryParts: string[] = [];
+  if (homeTeamId) queryParts.push(`homeTeamId=${homeTeamId}`);
+  if (awayTeamId) queryParts.push(`awayTeamId=${awayTeamId}`);
+  const url = `/api/engine/hsh-predict/${eventId}${queryParts.length ? `?${queryParts.join("&")}` : ""}`;
+
+  const { data, isLoading, isError, error, refetch, isFetching } =
+    useQuery<HSHPredictResponse>({
+      queryKey: [url],
+      enabled: canFetch,
+      staleTime: 5 * 60 * 1000,
+      retry: false,
+    });
+
+  const winColor = data ? HSH_COLORS[data.prediction] : Colors.dark.accent;
+
+  return (
+    <View style={[hshStyles.card, data && { borderColor: winColor + "44" }]}>
+      {/* Header */}
+      <View style={hshStyles.header}>
+        <View style={{ flex: 1 }}>
+          <Text style={hshStyles.title}>Highest Scoring Half</Text>
+          {data && (
+            <Text style={hshStyles.subtitle}>
+              {data.sampleCount} training samples · model accuracy {(data.modelAccuracy * 100).toFixed(1)}%
+            </Text>
+          )}
+        </View>
+        <TouchableOpacity
+          style={hshStyles.refreshBtn}
+          onPress={() => refetch()}
+          disabled={isFetching}
+        >
+          {isFetching
+            ? <ActivityIndicator size="small" color={Colors.dark.accent} />
+            : <Ionicons name="refresh" size={15} color={Colors.dark.accent} />
+          }
+        </TouchableOpacity>
+      </View>
+
+      {/* States */}
+      {(isLoading && !data) ? (
+        <View style={hshStyles.center}>
+          <ActivityIndicator size="small" color={Colors.dark.accent} />
+          <Text style={hshStyles.stateText}>Running HSH model…</Text>
+        </View>
+      ) : (isError || !data) ? (
+        <View style={hshStyles.center}>
+          <Ionicons name="school-outline" size={28} color={Colors.dark.textTertiary} />
+          <Text style={hshStyles.stateText}>
+            {(error as Error)?.message ?? "Train the HSH model from the Engine tab first."}
+          </Text>
+        </View>
+      ) : (
+        <>
+          {/* Predicted class badge */}
+          <View style={[hshStyles.predBadge, {
+            backgroundColor: winColor + "18",
+            borderColor: winColor + "55",
+          }]}>
+            <Ionicons name="analytics" size={13} color={winColor} />
+            <Text style={[hshStyles.predText, { color: winColor }]}>
+              {HSH_LABELS_MAP[data.prediction]}  ·  {data.confidence.toFixed(1)}% confidence
+            </Text>
+          </View>
+
+          {/* Three probability bars */}
+          <HSHBar label="1st Half" pct={data.probs.first}  color={HSH_COLORS.first}  isWinner={data.prediction === "first"}  delay={0}   />
+          <HSHBar label="2nd Half" pct={data.probs.second} color={HSH_COLORS.second} isWinner={data.prediction === "second"} delay={80}  />
+          <HSHBar label="Equal"    pct={data.probs.draw}   color={HSH_COLORS.draw}   isWinner={data.prediction === "draw"}   delay={160} />
+
+          {/* Key factors (collapsible) */}
+          {data.keyFactors.length > 0 && (
+            <TouchableOpacity
+              style={hshStyles.factorToggle}
+              onPress={() => setShowFactors(!showFactors)}
+            >
+              <Text style={hshStyles.factorToggleText}>
+                {showFactors ? "Hide" : "Show"} key factors
+              </Text>
+              <Ionicons
+                name={showFactors ? "chevron-up" : "chevron-down"}
+                size={13}
+                color={Colors.dark.accent}
+              />
+            </TouchableOpacity>
+          )}
+
+          {showFactors && (
+            <View style={hshStyles.factorList}>
+              {data.keyFactors.map((f, i) => (
+                <View key={i} style={hshStyles.factorRow}>
+                  <Text style={[
+                    hshStyles.factorDir,
+                    { color: f.direction === "+" ? "#4ade80" : "#f87171" },
+                  ]}>
+                    {f.direction}
+                  </Text>
+                  <Text style={hshStyles.factorLabel} numberOfLines={1}>{f.label}</Text>
+                  <View style={[
+                    hshStyles.factorBadge,
+                    { backgroundColor: HSH_COLORS[f.pushesTo] + "20" },
+                  ]}>
+                    <Text style={[hshStyles.factorBadgeText, { color: HSH_COLORS[f.pushesTo] }]}>
+                      {HSH_LABELS_MAP[f.pushesTo]}
+                    </Text>
+                  </View>
+                </View>
+              ))}
+            </View>
+          )}
+
+          {/* Source */}
+          <View style={hshStyles.sourceRow}>
+            <Ionicons
+              name={data.source === "database" ? "archive" : "flash"}
+              size={11}
+              color={data.source === "live" ? "#4ade80" : Colors.dark.textTertiary}
+            />
+            <Text style={hshStyles.sourceText}>
+              {data.source === "database" ? "Cached match data" : "Live simulation data"}
+            </Text>
+          </View>
+        </>
+      )}
+    </View>
+  );
+}
+
 interface Props {
   eventId: string;
   homeTeamId?: number;
@@ -389,6 +582,14 @@ export default function ScorePredictionTab({
         />
       )}
 
+      {/* HSH prediction section */}
+      <HSHSection
+        eventId={eventId}
+        homeTeamId={homeTeamId}
+        awayTeamId={awayTeamId}
+        canFetch={canFetch}
+      />
+
       {/* Footer */}
       <View style={styles.footer}>
         <Ionicons name="information-circle-outline" size={14} color={Colors.dark.textTertiary} />
@@ -400,6 +601,66 @@ export default function ScorePredictionTab({
     </ScrollView>
   );
 }
+
+const hshStyles = StyleSheet.create({
+  card: {
+    backgroundColor: Colors.dark.surface,
+    borderRadius: 14,
+    padding: 16,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: Colors.dark.border,
+  },
+  header: { flexDirection: "row", alignItems: "flex-start", marginBottom: 14 },
+  title: { fontSize: 16, fontFamily: "Inter_700Bold", color: Colors.dark.text },
+  subtitle: { fontSize: 11, fontFamily: "Inter_400Regular", color: Colors.dark.textSecondary, marginTop: 2 },
+  refreshBtn: {
+    width: 30, height: 30, borderRadius: 15,
+    backgroundColor: Colors.dark.background,
+    alignItems: "center", justifyContent: "center",
+  },
+  center: { alignItems: "center", gap: 8, paddingVertical: 18 },
+  stateText: { fontSize: 12, fontFamily: "Inter_400Regular", color: Colors.dark.textSecondary, textAlign: "center", lineHeight: 18 },
+  predBadge: {
+    flexDirection: "row", alignItems: "center", gap: 6,
+    borderWidth: 1, borderRadius: 20,
+    paddingHorizontal: 12, paddingVertical: 6,
+    marginBottom: 14, alignSelf: "flex-start",
+  },
+  predText: { fontSize: 13, fontFamily: "Inter_700Bold" },
+  hshRow: {
+    flexDirection: "row", alignItems: "center",
+    gap: 10, marginBottom: 7,
+    paddingHorizontal: 6, paddingVertical: 5,
+    borderRadius: 8,
+  },
+  hshLabel: {
+    width: 62, fontSize: 12,
+    fontFamily: "Inter_600SemiBold",
+    color: Colors.dark.textSecondary,
+  },
+  hshTrack: {
+    flex: 1, height: 6,
+    backgroundColor: Colors.dark.surfaceSecondary ?? Colors.dark.background,
+    borderRadius: 3, overflow: "hidden",
+  },
+  hshFill: { height: "100%", borderRadius: 3 },
+  hshPct: { width: 46, fontSize: 13, fontFamily: "Inter_700Bold", textAlign: "right" },
+  factorToggle: {
+    flexDirection: "row", alignItems: "center", gap: 5,
+    marginTop: 12, paddingTop: 10,
+    borderTopWidth: 1, borderTopColor: Colors.dark.border,
+  },
+  factorToggleText: { fontSize: 12, fontFamily: "Inter_600SemiBold", color: Colors.dark.accent },
+  factorList: { marginTop: 8, gap: 7 },
+  factorRow: { flexDirection: "row", alignItems: "center", gap: 8, paddingVertical: 3 },
+  factorDir: { width: 12, fontSize: 14, fontFamily: "Inter_700Bold" },
+  factorLabel: { flex: 1, fontSize: 11, fontFamily: "Inter_400Regular", color: Colors.dark.text },
+  factorBadge: { borderRadius: 10, paddingHorizontal: 8, paddingVertical: 2 },
+  factorBadgeText: { fontSize: 10, fontFamily: "Inter_700Bold" },
+  sourceRow: { flexDirection: "row", alignItems: "center", gap: 4, marginTop: 12 },
+  sourceText: { fontSize: 10, fontFamily: "Inter_400Regular", color: Colors.dark.textTertiary },
+});
 
 const styles = StyleSheet.create({
   scroll: { flex: 1, backgroundColor: Colors.dark.background },
