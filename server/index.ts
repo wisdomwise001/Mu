@@ -1,10 +1,13 @@
 import express from "express";
 import type { Request, Response, NextFunction } from "express";
+import { createProxyMiddleware } from "http-proxy-middleware";
 import { registerRoutes } from "./routes";
 import { scrapeGeonodeProxies } from "./proxyScraper";
 import { reloadProxies } from "./proxyFetch";
 import * as fs from "fs";
 import * as path from "path";
+
+const EXPO_WEB_PORT = 8080;
 
 const app = express();
 const log = console.log;
@@ -162,26 +165,56 @@ function serveLandingPage({
   res.status(200).send(html);
 }
 
-function configureExpoAndLanding(app: express.Application) {
-  const templatePath = path.resolve(
-    process.cwd(),
-    "server",
-    "templates",
-    "landing-page.html",
-  );
-  const landingPageTemplate = fs.readFileSync(templatePath, "utf-8");
-  const appName = getAppName();
+function configureExpoAndLanding(app: express.Application, server: import("http").Server) {
+  const isDev = process.env.NODE_ENV === "development";
 
+  if (isDev) {
+    log(`[web-proxy] Development mode — proxying web UI to http://localhost:${EXPO_WEB_PORT}`);
+
+    // Intercept iOS/Android manifest requests before the proxy
+    app.use((req: Request, res: Response, next: NextFunction) => {
+      if (req.path.startsWith("/api")) return next();
+      const platform = req.header("expo-platform");
+      if (platform && (platform === "ios" || platform === "android")) {
+        return serveExpoManifest(platform, res);
+      }
+      next();
+    });
+
+    // Proxy everything else (web UI + Metro HMR) to the Expo dev server
+    const expoProxy = createProxyMiddleware({
+      target: `http://localhost:${EXPO_WEB_PORT}`,
+      changeOrigin: true,
+      ws: true,
+      on: {
+        error: (_err, _req, res) => {
+          if (res && "writeHead" in res) {
+            (res as import("http").ServerResponse).writeHead(502);
+            (res as import("http").ServerResponse).end(
+              "Expo web dev server not ready yet — please wait a moment and refresh.",
+            );
+          }
+        },
+      },
+    });
+
+    app.use((req: Request, res: Response, next: NextFunction) => {
+      if (req.path.startsWith("/api")) return next();
+      return (expoProxy as any)(req, res, next);
+    });
+
+    // Upgrade WebSocket connections (Metro HMR / fast-refresh)
+    server.on("upgrade", expoProxy.upgrade as any);
+
+    return;
+  }
+
+  // --- Production: serve pre-built static files ---
   log("Serving static Expo files with dynamic manifest routing");
 
   app.use((req: Request, res: Response, next: NextFunction) => {
-    if (req.path.startsWith("/api")) {
-      return next();
-    }
-
-    if (req.path !== "/" && req.path !== "/manifest") {
-      return next();
-    }
+    if (req.path.startsWith("/api")) return next();
+    if (req.path !== "/" && req.path !== "/manifest") return next();
 
     const platform = req.header("expo-platform");
     if (platform && (platform === "ios" || platform === "android")) {
@@ -189,12 +222,15 @@ function configureExpoAndLanding(app: express.Application) {
     }
 
     if (req.path === "/") {
-      return serveLandingPage({
-        req,
-        res,
-        landingPageTemplate,
-        appName,
-      });
+      const templatePath = path.resolve(
+        process.cwd(),
+        "server",
+        "templates",
+        "landing-page.html",
+      );
+      const landingPageTemplate = fs.readFileSync(templatePath, "utf-8");
+      const appName = getAppName();
+      return serveLandingPage({ req, res, landingPageTemplate, appName });
     }
 
     next();
@@ -264,9 +300,9 @@ function scheduleProxyRefresh() {
   setupBodyParsing(app);
   setupRequestLogging(app);
 
-  configureExpoAndLanding(app);
-
   const server = await registerRoutes(app);
+
+  configureExpoAndLanding(app, server);
 
   setupErrorHandler(app);
 
