@@ -406,11 +406,21 @@ export async function proxyFetch(
       batch.push(...emergencyBatch);
     }
 
-    // Fire all batch requests concurrently; resolve on first usable response
+    // Fire all batch requests concurrently.
+    //
+    // Race strategy — prevents bad/fast proxies from winning with fake errors:
+    //   • 200 (ok)          → immediately wins the race; stop waiting.
+    //   • 404 / 403 / 429   → held as a fallback (proxy IS working, SofaScore
+    //                         said no); race continues so a 200 from a slower
+    //                         good proxy can still win.
+    //   • other non-ok / 0  → proxy broken; mark bad and keep waiting.
+    //   • all done, no 200  → return the first fallback (real SofaScore error).
+    //   • all done, nothing → resolve null → next round.
     type Winner = { res: SimpleResponse; latencyMs: number; proxy: ProxyState };
     const winner = await new Promise<Winner | null>((resolve) => {
       let pending = batch.length;
       let done = false;
+      let fallback: Winner | null = null;
 
       const finish = (w: Winner | null) => {
         if (done) return;
@@ -424,27 +434,36 @@ export async function proxyFetch(
           .then(({ res, latencyMs }) => {
             pending--;
             if (res.status > 0) {
-              const usable = res.ok || res.status === 404 || res.status === 403 || res.status === 429;
-              if (usable && !done) {
+              if (res.ok) {
+                // Real data — win immediately regardless of other pending proxies.
+                markGood(proxy, latencyMs);
                 finish({ res, latencyMs, proxy });
+              } else if (res.status === 404 || res.status === 403 || res.status === 429) {
+                // Proxy reached SofaScore but got an error back.
+                // Mark proxy healthy, store as fallback, but keep the race going.
+                markGood(proxy, latencyMs);
+                if (!fallback) fallback = { res, latencyMs, proxy };
+                if (pending === 0) finish(fallback);
               } else {
+                // Non-standard status — proxy likely broken.
                 markBad(proxy);
+                if (pending === 0) finish(fallback);
               }
             } else {
               markBad(proxy);
+              if (pending === 0) finish(fallback);
             }
-            if (pending === 0) finish(null);
           })
           .catch(() => {
             markBad(proxy);
             pending--;
-            if (pending === 0) finish(null);
+            if (pending === 0) finish(fallback);
           });
       }
     });
 
     if (winner) {
-      markGood(winner.proxy, winner.latencyMs);
+      // markGood already called inside the promise for the winning proxy.
       return winner.res;
     }
     // All proxies in this batch failed — try next round
