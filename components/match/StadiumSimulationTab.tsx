@@ -2440,7 +2440,7 @@ function HighestScoringHalfCard({
       {ctxData ? (
         <View style={{ marginTop: 10, padding: 8, borderRadius: 8, backgroundColor: "rgba(255,255,255,0.04)" }}>
           <Text style={[styles.statsSectionLabel, { marginBottom: 4 }]}>Match-day context</Text>
-          {ctxData.context.knockout.isKnockout && (
+          {ctxData.context?.knockout?.isKnockout && (
             <Text style={styles.signalText}>
               Stage: {ctxData.context.knockout.stage}
               {ctxData.context.knockout.isSecondLeg && ctxData.context.knockout.legOneScore
@@ -2448,7 +2448,7 @@ function HighestScoringHalfCard({
                 : ""}
             </Text>
           )}
-          {(ctxData.context.pressure.home || ctxData.context.pressure.away) && (
+          {(ctxData.context?.pressure?.home || ctxData.context?.pressure?.away) && (
             <Text style={styles.signalText}>
               Standings —{" "}
               {ctxData.context.pressure.home
@@ -2460,14 +2460,14 @@ function HighestScoringHalfCard({
                 : ""}
             </Text>
           )}
-          {(ctxData.context.fatigue.home.daysSinceLast != null || ctxData.context.fatigue.away.daysSinceLast != null) && (
+          {(ctxData.context?.fatigue?.home?.daysSinceLast != null || ctxData.context?.fatigue?.away?.daysSinceLast != null) && (
             <Text style={styles.signalText}>
               Rest — {homeTeamName}: {ctxData.context.fatigue.home.daysSinceLast ?? "?"}d
               ({ctxData.context.fatigue.home.matchesIn21Days} in 21d) · {awayTeamName}:{" "}
               {ctxData.context.fatigue.away.daysSinceLast ?? "?"}d ({ctxData.context.fatigue.away.matchesIn21Days} in 21d)
             </Text>
           )}
-          {(ctxData.context.subPatterns.home?.avgFirstSubMinute || ctxData.context.subPatterns.away?.avgFirstSubMinute) && (
+          {(ctxData.context?.subPatterns?.home?.avgFirstSubMinute || ctxData.context?.subPatterns?.away?.avgFirstSubMinute) && (
             <Text style={styles.signalText}>
               First sub avg — {homeTeamName}: {ctxData.context.subPatterns.home?.avgFirstSubMinute ?? "?"}'
               {ctxData.context.subPatterns.home?.conservative ? " (conservative)" : ""} ·{" "}
