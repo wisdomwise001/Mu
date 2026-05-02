@@ -189,10 +189,20 @@ function loadProxies(): void {
 /** Hot-reload pool after scraper writes a fresh proxies.json */
 export function reloadProxies(): void {
   if (healthTimer) { clearInterval(healthTimer); healthTimer = null; }
+  // Load the new pool BEFORE clearing the old one to avoid a window where
+  // both pools are empty and a concurrent request would see no proxies.
   initialized = false;
+  const oldActive = activePool;
+  const oldDead = deadPool;
   activePool = [];
   deadPool = [];
   loadProxies();
+  // If loading failed and produced nothing, keep the old pools alive.
+  if (activePool.length === 0 && deadPool.length === 0) {
+    activePool = oldActive;
+    deadPool = oldDead;
+    console.warn("[proxyPool] Reload produced no proxies — keeping existing pool.");
+  }
   startHealthCheck();
 }
 
@@ -310,35 +320,65 @@ function requestThroughAgent(
   });
 }
 
+// ── Revive dead proxies whose cooldown has expired ────────────────────────────
+function reviveExpiredProxies(): void {
+  const now = Date.now();
+  const toRevive = deadPool.filter(
+    (p) => p.deadSince !== null && now - p.deadSince >= DEAD_RETRY_AFTER_MS
+  );
+  if (toRevive.length > 0) {
+    deadPool = deadPool.filter((p) => !toRevive.includes(p));
+    for (const p of toRevive) {
+      p.consecutiveFails = 0;
+      p.deadSince = null;
+      p.score = computeScore(p);
+      activePool.push(p);
+    }
+    activePool.sort((a, b) => b.score - a.score);
+  }
+}
+
+// ── Force-revive ALL dead proxies regardless of cooldown ──────────────────────
+// Used as a last resort when the active pool is completely exhausted.
+function forceReviveAllDead(): void {
+  if (deadPool.length === 0) return;
+  for (const p of deadPool) {
+    p.consecutiveFails = 0;
+    p.deadSince = null;
+    p.score = computeScore(p);
+    activePool.push(p);
+  }
+  deadPool = [];
+  activePool.sort((a, b) => b.score - a.score);
+  console.warn(`[proxyPool] Force-revived ${activePool.length} dead proxies — active pool was exhausted.`);
+}
+
 // ── Main export: parallel-racing proxy fetch ──────────────────────────────────
 // Each round fires RACE_WIDTH proxies simultaneously and resolves as soon as
 // the first one returns a usable response, so latency = fastest proxy in the
 // batch rather than the sum of sequential failures.
+//
+// NEVER falls back to a direct request — all traffic must go through a proxy.
+// If no proxies are available at all, throws immediately so the caller can
+// return a clean error to the client instead of leaking the Replit IP.
 export async function proxyFetch(
   url: string,
   init: RequestInit = {}
 ): Promise<SimpleResponse> {
   loadProxies();
 
-  // No proxies at all → direct fetch fallback
+  // Hard-fail immediately if no proxy list was ever loaded.
+  // We must NOT fall back to a direct fetch because the Replit IP is blocked.
   if (activePool.length === 0 && deadPool.length === 0) {
-    const r = await fetch(url, init);
-    const buf = Buffer.from(await r.arrayBuffer());
-    return {
-      ok: r.ok,
-      status: r.status,
-      statusText: r.statusText,
-      headers: r.headers,
-      text:        async () => buf.toString("utf-8"),
-      json:        async () => JSON.parse(buf.toString("utf-8")),
-      arrayBuffer: async () =>
-        buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) as ArrayBuffer,
-    };
+    throw new Error("proxyFetch: no proxies loaded — cannot fetch without a proxy");
   }
 
   const tried = new Set<ProxyState>();
 
   for (let round = 0; round < MAX_ROUNDS; round++) {
+    // Before picking each round, revive any dead proxies whose cooldown expired.
+    reviveExpiredProxies();
+
     // Pick up to RACE_WIDTH fresh proxies for this round (Tier-1 preferred)
     const batch: ProxyState[] = [];
     for (let i = 0; i < RACE_WIDTH; i++) {
@@ -350,7 +390,21 @@ export async function proxyFetch(
       batch.push(proxy);
       tried.add(proxy);
     }
-    if (batch.length === 0) break;
+
+    // Active pool exhausted for this round — force-revive all dead proxies and
+    // try one final emergency round before giving up.
+    if (batch.length === 0) {
+      forceReviveAllDead();
+      const emergencyBatch: ProxyState[] = [];
+      for (let i = 0; i < RACE_WIDTH; i++) {
+        const proxy = weightedPick(activePool, tried);
+        if (!proxy) break;
+        emergencyBatch.push(proxy);
+        tried.add(proxy);
+      }
+      if (emergencyBatch.length === 0) break;
+      batch.push(...emergencyBatch);
+    }
 
     // Fire all batch requests concurrently; resolve on first usable response
     type Winner = { res: SimpleResponse; latencyMs: number; proxy: ProxyState };

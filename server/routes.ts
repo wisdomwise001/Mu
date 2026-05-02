@@ -2363,7 +2363,24 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.get("/api/event/:eventId", async (req: Request, res: Response) => {
     try {
-      const data = await fetchSofaScoreOptional(`/event/${req.params.eventId}`);
+      const eventIdNum = parseInt(req.params.eventId, 10);
+      let data = await fetchSofaScoreOptional(`/event/${req.params.eventId}`);
+
+      // Fallback: scan the in-memory scheduled-events cache for this event.
+      // This covers the common case where SofaScore blocks the individual event
+      // endpoint but the event data is already loaded from the match list.
+      if (!data) {
+        for (const [key, entry] of sofaCache.entries()) {
+          if (!key.includes("/scheduled-events/")) continue;
+          const events: any[] = entry.data?.events ?? [];
+          const found = events.find((e: any) => e?.id === eventIdNum);
+          if (found) {
+            data = { event: found };
+            break;
+          }
+        }
+      }
+
       if (!data) return res.status(404).json({ error: "Event not found" });
       res.json(data);
     } catch (error: any) {
