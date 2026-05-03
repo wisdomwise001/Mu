@@ -4,6 +4,7 @@ import { createProxyMiddleware } from "http-proxy-middleware";
 import { registerRoutes } from "./routes";
 import { scrapeGeonodeProxies } from "./proxyScraper";
 import { reloadProxies } from "./proxyFetch";
+import { ensureTor } from "./torManager";
 import * as fs from "fs";
 import * as path from "path";
 
@@ -315,6 +316,11 @@ function scheduleProxyRefresh() {
     },
     () => {
       log(`express server serving on port ${port}`);
+
+      // Start Tor in background immediately so it's ready before the first request
+      ensureTor()
+        .then(() => log("[tor] ✅ Background bootstrap complete"))
+        .catch((err: any) => log(`[tor] Bootstrap error: ${err.message}`));
 
       // Refresh proxies on startup if stale (older than 15 minutes or missing)
       const ageMs = getProxyFileAgeMs();

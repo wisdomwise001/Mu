@@ -25,6 +25,8 @@ import {
 } from "./halfScoringTrainer";
 import { proxyFetch, reloadProxies, getProxyStats } from "./proxyFetch";
 import { scrapeGeonodeProxies } from "./proxyScraper";
+import { torFetch, getTorStatus, rotateTorCircuit } from "./torFetch";
+import { ensureTor } from "./torManager";
 
 let _openai: OpenAI | null = null;
 function getOpenAI(): OpenAI {
@@ -1867,6 +1869,38 @@ async function fetchSofaScore(endpoint: string) {
 
   const promise = (async () => {
     const url = `${SOFASCORE_API}${endpoint}`;
+
+    // ── Primary path: Tor network ────────────────────────────────────────────
+    // Tor gives us a clean exit IP on every circuit — no per-request delays,
+    // no proxy pool exhaustion, no rate-limit bans. Falls back to the proxy
+    // pool automatically if Tor is still bootstrapping or fails.
+    const torState = getTorStatus();
+    if (torState.status === "ready" || torState.status === "rotating") {
+      try {
+        const res = await torFetch(url, { headers: SOFASCORE_HEADERS });
+        if (res.ok) {
+          const data = await res.json();
+          const entry: CacheEntry = { data, expiresAt: Date.now() + sofaCacheTtl(endpoint) };
+          sofaCache.set(endpoint, entry);
+          saveDiskCache(endpoint, entry);
+          return data;
+        }
+        // 429 = rate limited on this circuit → rotate and fall through to proxy
+        if (res.status === 429) {
+          rotateTorCircuit().catch(() => {});
+        }
+        if (res.status === 404 || res.status === 403) {
+          throw new Error(`SofaScore API error: ${res.status}`);
+        }
+        // Other non-ok: fall through to proxy pool
+      } catch (torErr: any) {
+        if (torErr.message?.includes("SofaScore API error:")) throw torErr;
+        // Tor failed (network issue, etc.) — fall through to proxy pool
+        console.warn(`[tor] Fetch failed for ${endpoint}: ${torErr.message} — falling back to proxy pool`);
+      }
+    }
+
+    // ── Fallback path: rotating proxy pool ───────────────────────────────────
     const res = await proxyFetch(url, { headers: SOFASCORE_HEADERS });
     if (!res.ok) {
       throw new Error(`SofaScore API error: ${res.status}`);
@@ -2341,6 +2375,31 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.get("/api/admin/proxy-stats", (_req: Request, res: Response) => {
     res.json({ ...getProxyStats(), scrape: proxyScrapeState });
+  });
+
+  // ── Tor: status ─────────────────────────────────────────────────────────────
+  app.get("/api/admin/tor-status", (_req: Request, res: Response) => {
+    res.json(getTorStatus());
+  });
+
+  // ── Tor: rotate circuit ──────────────────────────────────────────────────────
+  app.post("/api/admin/tor-rotate", async (_req: Request, res: Response) => {
+    try {
+      await rotateTorCircuit();
+      res.json({ success: true, ...getTorStatus() });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ── Tor: manually trigger bootstrap (normally auto-starts on first request) ──
+  app.post("/api/admin/tor-start", async (_req: Request, res: Response) => {
+    try {
+      ensureTor().catch(() => {});
+      res.json({ success: true, ...getTorStatus() });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
   });
 
   app.get(
