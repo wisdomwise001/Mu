@@ -11,7 +11,8 @@ const DATA_DIR  = path.join(process.cwd(), "data", "tor-data");
 
 const SOCKS_PORT   = 9050;
 const CONTROL_PORT = 9051;
-const BOOTSTRAP_TIMEOUT_MS = 120_000;
+const BOOTSTRAP_TIMEOUT_MS  = 120_000;
+const AUTO_ROTATE_INTERVAL_MS = 10 * 60 * 1000; // rotate exit IP every 10 minutes
 
 export type TorStatus = "idle" | "bootstrapping" | "ready" | "rotating" | "error";
 
@@ -21,6 +22,7 @@ let bootstrapPct  = 0;
 let torExitIp: string | null = null;
 let circuitNum    = 0;
 let startPromise: Promise<void> | null = null;
+let rotateTimer: ReturnType<typeof setInterval> | null = null;
 
 // ── Tor SOCKS5 agent (port 9050) ──────────────────────────────────────────────
 export function getTorAgent(): SocksProxyAgent {
@@ -105,6 +107,7 @@ async function _startTor(): Promise<void> {
           circuitNum = 1;
           console.log("[tor] ✅ Tor ready — SOCKS5 on port", SOCKS_PORT);
           _fetchExitIp().catch(() => {});
+          _startAutoRotate();
           resolve();
         }
       }
@@ -136,6 +139,7 @@ async function _startTor(): Promise<void> {
     });
 
     torProcess!.on("exit", (code, signal) => {
+      _stopAutoRotate();
       if (torStatus !== "ready") {
         clearTimeout(timer);
         torStatus = "error";
@@ -150,6 +154,28 @@ async function _startTor(): Promise<void> {
       }
     });
   });
+}
+
+// ── Auto-rotate timer ─────────────────────────────────────────────────────────
+function _startAutoRotate(): void {
+  _stopAutoRotate();
+  rotateTimer = setInterval(async () => {
+    if (torStatus !== "ready") return;
+    console.log(`[tor] Auto-rotating circuit (every ${AUTO_ROTATE_INTERVAL_MS / 60000} min)…`);
+    try {
+      await rotateTorCircuit();
+      console.log(`[tor] Auto-rotated → circuit #${circuitNum}, exit IP: ${torExitIp ?? "unknown"}`);
+    } catch (err: any) {
+      console.warn("[tor] Auto-rotate failed:", err.message);
+    }
+  }, AUTO_ROTATE_INTERVAL_MS);
+}
+
+function _stopAutoRotate(): void {
+  if (rotateTimer) {
+    clearInterval(rotateTimer);
+    rotateTimer = null;
+  }
 }
 
 // ── Control port ──────────────────────────────────────────────────────────────
