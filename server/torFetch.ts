@@ -1,11 +1,16 @@
 import https from "node:https";
 import http from "node:http";
 import zlib from "node:zlib";
+import pLimit from "p-limit";
 import { ensureTor, getTorAgent, rotateTorCircuit, getTorStatus } from "./torManager";
 
 export { getTorStatus, rotateTorCircuit };
 
-const REQUEST_TIMEOUT_MS = 15_000;
+const REQUEST_TIMEOUT_MS = 30_000;
+
+// Cap concurrent Tor streams — a single Tor circuit handles ~8–10 streams well.
+// Beyond that, queuing inside Tor causes cascading timeouts.
+const torConcurrency = pLimit(8);
 
 export type SimpleResponse = {
   ok: boolean;
@@ -23,6 +28,15 @@ export async function torFetch(
 ): Promise<SimpleResponse> {
   await ensureTor();
 
+  // Serialize through the concurrency cap — callers that exceed the cap queue
+  // here rather than hammering the Tor circuit simultaneously.
+  return torConcurrency(() => _doTorFetch(url, init));
+}
+
+function _doTorFetch(
+  url: string,
+  init: { headers?: Record<string, string> } = {}
+): Promise<SimpleResponse> {
   const agent = getTorAgent();
   const parsedUrl = new URL(url);
   const isHttps = parsedUrl.protocol === "https:";

@@ -8,7 +8,7 @@ import { HttpsProxyAgent } from "https-proxy-agent";
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const PROXIES_PATH = path.join(process.cwd(), "data", "proxies.json");
-const REQUEST_TIMEOUT_MS = 8000;
+const REQUEST_TIMEOUT_MS = 15000;
 const DEAD_RETRY_AFTER_MS = 10 * 60 * 1000; // recycle dead proxies after 10 min
 const HEALTH_CHECK_INTERVAL_MS = 5 * 60 * 1000; // background health-check every 5 min
 const RACE_WIDTH = 20;  // proxies fired simultaneously per round

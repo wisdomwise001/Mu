@@ -6080,9 +6080,9 @@ Format with clear markdown headings (### for sections). Keep it punchy but thoro
       const serverPort = process.env.PORT || 5000;
       const baseUrl = `http://localhost:${serverPort}`;
 
-      // Process up to 4 matches concurrently — the shared in-memory cache
-      // deduplicates overlapping SofaScore calls across concurrent matches.
-      const limit = pLimit(4);
+      // Process one match at a time — each simulation fans out to ~100 SofaScore
+      // sub-requests. Running 4 at once saturates the Tor circuit and causes timeouts.
+      const limit = pLimit(1);
 
       (async () => {
         const tasks = finishedEvents.map((event) =>
@@ -6126,12 +6126,9 @@ Format with clear markdown headings (### for sections). Keep it punchy but thoro
           const aHtGoals = event.awayScore?.period1 != null ? Number(event.awayScore.period1) : null;
 
           try {
-            // Small stagger to spread proxy usage across concurrent batches
-            await sleep(Math.floor(Math.random() * 300));
-
             const simRes = await fetch(
               `${baseUrl}/api/event/${eventId}/player-simulation?homeTeamId=${homeTeamId}&awayTeamId=${awayTeamId}`,
-              { signal: AbortSignal.timeout(60000) }
+              { signal: AbortSignal.timeout(180000) }
             );
 
             if (!simRes.ok) {
