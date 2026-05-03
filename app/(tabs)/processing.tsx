@@ -318,7 +318,7 @@ export default function ProcessingScreen() {
         <View style={styles.noticeBox}>
           <Ionicons name="shield-checkmark-outline" size={16} color="#60a5fa" />
           <Text style={styles.noticeText}>
-            Matches are processed one at a time with a 2.5s delay between each to prevent rate limiting. Large dates may take several minutes.
+            Matches are processed one at a time through Tor. If the Tor exit node is blocked, requests automatically fall back to the proxy pool. Large dates may take several minutes.
           </Text>
         </View>
 

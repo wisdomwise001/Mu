@@ -1885,14 +1885,16 @@ async function fetchSofaScore(endpoint: string) {
           saveDiskCache(endpoint, entry);
           return data;
         }
-        // 429 = rate limited on this circuit → rotate and fall through to proxy
-        if (res.status === 429) {
+        // 429 or 403 = this exit node is rate-limited / IP-blocked → rotate circuit
+        // and fall through to the proxy pool for this request.
+        if (res.status === 429 || res.status === 403) {
           rotateTorCircuit().catch(() => {});
         }
-        if (res.status === 404 || res.status === 403) {
+        // 404 = resource truly doesn't exist — no point trying proxy
+        if (res.status === 404) {
           throw new Error(`SofaScore API error: ${res.status}`);
         }
-        // Other non-ok: fall through to proxy pool
+        // All other non-ok statuses (403, 429, 5xx…): fall through to proxy pool
       } catch (torErr: any) {
         if (torErr.message?.includes("SofaScore API error:")) throw torErr;
         // Tor failed (network issue, etc.) — fall through to proxy pool
