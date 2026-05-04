@@ -1,0 +1,1 @@
+{"endpoint":"/event/12162820/statistics","data":{"statistics":[{"period":"ALL","groups":[{"groupName":"Match overview","statisticsItems":[{"name":"Corner kicks","home":"1","away":"3","compareCode":2,"statisticsType":"positive","valueType":"event","homeValue":1,"awayValue":3,"renderType":1,"key":"cornerKicks"}]}]}]},"expiresAt":1777970456052}

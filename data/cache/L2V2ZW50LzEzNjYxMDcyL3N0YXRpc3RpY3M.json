@@ -1,0 +1,1 @@
+{"endpoint":"/event/13661072/statistics","data":{"statistics":[{"period":"ALL","groups":[{"groupName":"Match overview","statisticsItems":[{"name":"Yellow cards","home":"2","away":"1","compareCode":1,"statisticsType":"negative","valueType":"event","homeValue":2,"awayValue":1,"renderType":1,"key":"yellowCards"}]}]}]},"expiresAt":1777968728224}

@@ -1,0 +1,1 @@
+{"endpoint":"/event/14864069/statistics","data":{"statistics":[{"period":"ALL","groups":[{"groupName":"Match overview","statisticsItems":[{"name":"Ball possession","home":"50%","away":"50%","compareCode":3,"statisticsType":"positive","valueType":"event","homeValue":50,"awayValue":50,"renderType":2,"key":"ballPossession"}]}]}]},"expiresAt":1777967409479}
