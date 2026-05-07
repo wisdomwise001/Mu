@@ -4241,10 +4241,53 @@ export async function registerRoutes(app: Express): Promise<Server> {
     "/api/event/:eventId/h2h/events",
     async (req: Request, res: Response) => {
       try {
-        const data = await fetchSofaScoreOptional(
-          `/event/${req.params.eventId}/h2h/events`,
-        );
-        res.json(data ?? { events: [] });
+        const { eventId } = req.params;
+        const homeTeamId = req.query.homeTeamId ? String(req.query.homeTeamId) : null;
+        const awayTeamId = req.query.awayTeamId ? String(req.query.awayTeamId) : null;
+
+        // Primary H2H fetch
+        const data = (await fetchSofaScoreOptional(`/event/${eventId}/h2h/events`)) ?? {};
+
+        const result: {
+          events: any[];
+          homeTeamEvents: any[];
+          awayTeamEvents: any[];
+        } = {
+          events: data.events ?? [],
+          homeTeamEvents: data.homeTeamEvents ?? [],
+          awayTeamEvents: data.awayTeamEvents ?? [],
+        };
+
+        // If SofaScore didn't return team-specific recent form, fetch it separately
+        if (result.homeTeamEvents.length === 0 && homeTeamId) {
+          try {
+            const [p0, p1] = await Promise.all([
+              fetchSofaScoreOptional(`/team/${homeTeamId}/events/last/0`),
+              fetchSofaScoreOptional(`/team/${homeTeamId}/events/last/1`),
+            ]);
+            const raw = [...(p0?.events ?? []), ...(p1?.events ?? [])];
+            result.homeTeamEvents = raw
+              .filter((e: any) => e.status?.type === "finished")
+              .sort((a: any, b: any) => b.startTimestamp - a.startTimestamp)
+              .slice(0, 10);
+          } catch { /* optional */ }
+        }
+
+        if (result.awayTeamEvents.length === 0 && awayTeamId) {
+          try {
+            const [p0, p1] = await Promise.all([
+              fetchSofaScoreOptional(`/team/${awayTeamId}/events/last/0`),
+              fetchSofaScoreOptional(`/team/${awayTeamId}/events/last/1`),
+            ]);
+            const raw = [...(p0?.events ?? []), ...(p1?.events ?? [])];
+            result.awayTeamEvents = raw
+              .filter((e: any) => e.status?.type === "finished")
+              .sort((a: any, b: any) => b.startTimestamp - a.startTimestamp)
+              .slice(0, 10);
+          } catch { /* optional */ }
+        }
+
+        res.json(result);
       } catch (error: any) {
         res.status(500).json({ error: error.message });
       }
