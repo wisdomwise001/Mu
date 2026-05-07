@@ -25,7 +25,7 @@ import {
 } from "./halfScoringTrainer";
 import { proxyFetch, reloadProxies, getProxyStats } from "./proxyFetch";
 import { scrapeGeonodeProxies } from "./proxyScraper";
-import { getTorStatus, rotateTorCircuit } from "./torFetch";
+import { torFetch, getTorStatus, rotateTorCircuit } from "./torFetch";
 import { ensureTor } from "./torManager";
 
 let _openai: OpenAI | null = null;
@@ -1870,6 +1870,31 @@ async function fetchSofaScore(endpoint: string) {
   const promise = (async () => {
     const url = `${SOFASCORE_API}${endpoint}`;
 
+    // ── Primary path: Tor network ────────────────────────────────────────────
+    const torState = getTorStatus();
+    if (torState.status === "ready" || torState.status === "rotating") {
+      try {
+        const res = await torFetch(url, { headers: SOFASCORE_HEADERS });
+        if (res.ok) {
+          const data = await res.json();
+          const entry: CacheEntry = { data, expiresAt: Date.now() + sofaCacheTtl(endpoint) };
+          sofaCache.set(endpoint, entry);
+          saveDiskCache(endpoint, entry);
+          return data;
+        }
+        if (res.status === 429 || res.status === 403) {
+          rotateTorCircuit().catch(() => {});
+        }
+        if (res.status === 404) {
+          throw new Error(`SofaScore API error: ${res.status}`);
+        }
+      } catch (torErr: any) {
+        if (torErr.message?.includes("SofaScore API error:")) throw torErr;
+        console.warn(`[tor] Fetch failed for ${endpoint}: ${torErr.message} — falling back to proxy pool`);
+      }
+    }
+
+    // ── Fallback path: rotating proxy pool ───────────────────────────────────
     const res = await proxyFetch(url, { headers: SOFASCORE_HEADERS });
     if (!res.ok) {
       throw new Error(`SofaScore API error: ${res.status}`);
