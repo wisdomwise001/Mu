@@ -109,6 +109,7 @@ export default function EngineScreen() {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [selectedBucket, setSelectedBucket] = useState<string | null>(null);
   const [outcomePolling, setOutcomePolling] = useState(false);
+  const [allOutcomesPolling, setAllOutcomesPolling] = useState(false);
   const [hshPolling, setHshPolling] = useState(false);
   const webTop = Platform.OS === "web" ? 67 : 0;
   const webBottom = Platform.OS === "web" ? 84 : 0;
@@ -234,6 +235,44 @@ export default function EngineScreen() {
   }, [selectedBucket, trainOutcomeMutation]);
 
   const isOutcomeTraining = outcomePolling && outcomeProgress?.running;
+
+  // ── Train All Outcomes ─────────────────────────────────────────────────────
+  const { data: allOutcomesProgress } = useQuery<{
+    running: boolean;
+    totalBuckets: number;
+    completedBuckets: number;
+    currentBucket: string | null;
+    progress: number;
+    message: string;
+    error: string | null;
+    results: string[];
+  }>({
+    queryKey: ["/api/engine/all-outcomes-progress"],
+    refetchInterval: allOutcomesPolling ? 1500 : false,
+    enabled: allOutcomesPolling,
+  });
+
+  useEffect(() => {
+    if (allOutcomesProgress !== undefined && allOutcomesProgress.running === false && allOutcomesPolling) {
+      setAllOutcomesPolling(false);
+      refetchBuckets();
+      queryClient.invalidateQueries({ queryKey: ["/api/engine/outcome-buckets"] });
+    }
+  }, [allOutcomesProgress, allOutcomesPolling]);
+
+  const trainAllMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/engine/train-all-outcomes");
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.removeQueries({ queryKey: ["/api/engine/all-outcomes-progress"] });
+      setAllOutcomesPolling(true);
+    },
+    onError: (err: Error) => Alert.alert("Training Error", err.message, [{ text: "OK" }]),
+  });
+
+  const isAllOutcomesTraining = allOutcomesPolling && allOutcomesProgress?.running;
 
   // ── HSH model ─────────────────────────────────────────────────────────────
   const { data: hshStatus, refetch: refetchHshStatus } = useQuery<any>({
@@ -440,10 +479,10 @@ export default function EngineScreen() {
           <TouchableOpacity
             style={[
               styles.trainOutcomeBtn,
-              (!selectedBucket || isOutcomeTraining) && styles.trainOutcomeBtnDisabled,
+              (!selectedBucket || isOutcomeTraining || isAllOutcomesTraining) && styles.trainOutcomeBtnDisabled,
             ]}
             onPress={handleTrainOutcome}
-            disabled={!selectedBucket || !!isOutcomeTraining}
+            disabled={!selectedBucket || !!isOutcomeTraining || !!isAllOutcomesTraining}
             testID="train-outcome-btn"
           >
             {isOutcomeTraining ? (
@@ -458,7 +497,7 @@ export default function EngineScreen() {
             )}
           </TouchableOpacity>
 
-          {selectedBucket && selectedModel && !isOutcomeTraining && (
+          {selectedBucket && selectedModel && !isOutcomeTraining && !isAllOutcomesTraining && (
             <TouchableOpacity
               style={styles.deleteOutcomeBtn}
               onPress={() => deleteOutcomeMutation.mutate(selectedBucket)}
@@ -468,6 +507,47 @@ export default function EngineScreen() {
             </TouchableOpacity>
           )}
         </View>
+
+        {/* Train All Buckets button */}
+        <TouchableOpacity
+          style={[
+            styles.trainAllBtn,
+            (isAllOutcomesTraining || isOutcomeTraining || trainAllMutation.isPending) && styles.trainOutcomeBtnDisabled,
+          ]}
+          onPress={() => trainAllMutation.mutate()}
+          disabled={isAllOutcomesTraining || !!isOutcomeTraining || trainAllMutation.isPending}
+          testID="train-all-outcomes-btn"
+        >
+          {isAllOutcomesTraining || trainAllMutation.isPending ? (
+            <ActivityIndicator size="small" color={Colors.dark.accent} />
+          ) : (
+            <Ionicons name="layers" size={16} color={Colors.dark.accent} />
+          )}
+          <Text style={styles.trainAllBtnText}>
+            {isAllOutcomesTraining
+              ? `Training all… ${allOutcomesProgress?.completedBuckets ?? 0}/${allOutcomesProgress?.totalBuckets ?? 0}`
+              : "Train All Buckets"}
+          </Text>
+        </TouchableOpacity>
+
+        {isAllOutcomesTraining && (
+          <View style={styles.outcomeProgress}>
+            <View style={styles.progressBarBg}>
+              <View style={[styles.progressBarFill, { width: `${allOutcomesProgress?.progress ?? 0}%`, backgroundColor: Colors.dark.accent }]} />
+            </View>
+            <Text style={styles.outcomeProgressMsg}>{allOutcomesProgress?.message ?? "Working…"}</Text>
+          </View>
+        )}
+
+        {allOutcomesProgress?.results && allOutcomesProgress.results.length > 0 && !isAllOutcomesTraining && (
+          <View style={styles.allResultsBox}>
+            {allOutcomesProgress.results.map((r, i) => (
+              <Text key={i} style={[styles.allResultLine, r.startsWith("✓") ? { color: "#22c55e" } : { color: "#ef4444" }]}>
+                {r}
+              </Text>
+            ))}
+          </View>
+        )}
 
         {isOutcomeTraining && (
           <View style={styles.outcomeProgress}>
@@ -728,6 +808,26 @@ const styles = StyleSheet.create({
   outputDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: Colors.dark.accent, marginTop: 5 },
   outputLabel: { fontSize: 13, fontFamily: "Inter_600SemiBold", color: Colors.dark.text },
   outputDesc: { fontSize: 11, fontFamily: "Inter_400Regular", color: Colors.dark.textSecondary, lineHeight: 16 },
+
+  trainAllBtn: {
+    borderRadius: 10,
+    paddingVertical: 11,
+    paddingHorizontal: 14,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: Colors.dark.accent + "66",
+    backgroundColor: Colors.dark.accent + "11",
+  },
+  trainAllBtnText: { color: Colors.dark.accent, fontSize: 14, fontFamily: "Inter_600SemiBold" },
+  allResultsBox: {
+    backgroundColor: "#0f172a", borderRadius: 8, padding: 10,
+    marginBottom: 12, borderWidth: 1, borderColor: "#1e293b",
+  },
+  allResultLine: { fontSize: 11, fontFamily: "Inter_400Regular", lineHeight: 18 },
 
   // Per-score-outcome models
   outcomeSection: { marginBottom: 24 },
