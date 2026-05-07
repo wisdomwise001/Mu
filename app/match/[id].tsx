@@ -224,6 +224,8 @@ export default function MatchDetailScreen() {
             awayTeamId={awayTeamId}
             venue={venue}
             city={city}
+            startTimestamp={startTimestamp}
+            statusType={statusType}
           />
         )}
         {activeTab === "Standings" && (

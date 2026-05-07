@@ -41,6 +41,8 @@ interface StadiumSimulationTabProps {
   awayTeamId: number;
   venue?: string;
   city?: string;
+  startTimestamp?: number;
+  statusType?: string;
 }
 
 interface FormationRow {
@@ -1383,18 +1385,24 @@ function PatternHeatRow({
   side,
   maxScored,
   maxConceded,
+  activeBucket,
 }: {
   bucket: ScoringBucket;
   side: "home" | "away";
   maxScored: number;
   maxConceded: number;
+  activeBucket?: string | null;
 }) {
   const sPct = maxScored   > 0 ? Math.max(4, (bucket.scored   / maxScored)   * 100) : 4;
   const cPct = maxConceded > 0 ? Math.max(4, (bucket.conceded / maxConceded) * 100) : 4;
   const sideColor = side === "home" ? Colors.dark.homeKit : Colors.dark.awayKit;
+  const isActive = activeBucket != null && bucket.label === activeBucket;
   return (
-    <View style={styles.patternRow}>
-      <Text style={styles.patternBucketLabel}>{bucket.label}</Text>
+    <View style={[styles.patternRow, isActive && styles.patternRowActive]}>
+      <View style={styles.patternBucketLabelWrap}>
+        {isActive && <View style={styles.patternLiveDot} />}
+        <Text style={[styles.patternBucketLabel, isActive && styles.patternBucketLabelActive]}>{bucket.label}</Text>
+      </View>
       <View style={styles.patternBars}>
         <View style={styles.patternBarBlock}>
           <View style={styles.patternBarTrack}>
@@ -1422,10 +1430,12 @@ function PatternSideBlock({
   teamName,
   side,
   patterns,
+  activeBucket,
 }: {
   teamName: string;
   side: "home" | "away";
   patterns?: ScoringPatterns | null;
+  activeBucket?: string | null;
 }) {
   if (!patterns) return null;
   if (patterns.matchesWithIncidents === 0 && patterns.matchesAnalyzed === 0) return null;
@@ -1508,6 +1518,7 @@ function PatternSideBlock({
           side={side}
           maxScored={maxScored}
           maxConceded={maxConceded}
+          activeBucket={activeBucket}
         />
       ))}
 
@@ -1675,11 +1686,15 @@ function ScoringPatternsCard({
   awayTeamName,
   homePatterns,
   awayPatterns,
+  activeBucket,
+  matchMinute,
 }: {
   homeTeamName: string;
   awayTeamName: string;
   homePatterns?: ScoringPatterns | null;
   awayPatterns?: ScoringPatterns | null;
+  activeBucket?: string | null;
+  matchMinute?: number | null;
 }) {
   if (!homePatterns && !awayPatterns) return null;
   const hasAny =
@@ -1689,13 +1704,21 @@ function ScoringPatternsCard({
 
   return (
     <View style={styles.phaseCard}>
-      <Text style={styles.cardLabel}>Scoring & Conceding Patterns · Last 15</Text>
+      <View style={styles.patternCardHeader}>
+        <Text style={styles.cardLabel}>Scoring & Conceding Patterns · Last 15</Text>
+        {activeBucket != null && matchMinute != null && (
+          <View style={styles.liveClockPill}>
+            <View style={styles.liveClockDot} />
+            <Text style={styles.liveClockText}>{matchMinute}′ · {activeBucket}</Text>
+          </View>
+        )}
+      </View>
       <Text style={styles.patternIntro}>
         Goal-timing fingerprint per team — when they strike, when they leak, and what makes them deadly or flop versus their xG.
       </Text>
-      <PatternSideBlock teamName={homeTeamName} side="home" patterns={homePatterns} />
+      <PatternSideBlock teamName={homeTeamName} side="home" patterns={homePatterns} activeBucket={activeBucket} />
       <View style={{ height: 12 }} />
-      <PatternSideBlock teamName={awayTeamName} side="away" patterns={awayPatterns} />
+      <PatternSideBlock teamName={awayTeamName} side="away" patterns={awayPatterns} activeBucket={activeBucket} />
     </View>
   );
 }
@@ -3017,6 +3040,44 @@ function clampForSimulation(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
 
+// ─── Live match clock ───────────────────────────────────────────────────────
+function getActiveBucket(startTimestamp: number, statusType: string): string | null {
+  if (statusType !== "inprogress") return null;
+  const elapsed = (Date.now() / 1000 - startTimestamp) / 60; // minutes
+  if (elapsed < 0) return null;
+  if (elapsed <= 15) return "0–15′";
+  if (elapsed <= 30) return "16–30′";
+  if (elapsed <= 47) return "31–45′"; // includes typical first-half stoppage
+  if (elapsed <= 62) return null;     // half-time break
+  const actual = elapsed - 15;        // adjust for ~15 min break
+  if (actual <= 60) return "46–60′";
+  if (actual <= 75) return "61–75′";
+  return "76–90′";
+}
+
+function useLiveMatchClock(startTimestamp?: number, statusType?: string): { activeBucket: string | null; matchMinute: number | null } {
+  const compute = () => {
+    if (!startTimestamp || statusType !== "inprogress") return { activeBucket: null, matchMinute: null };
+    const elapsed = (Date.now() / 1000 - startTimestamp) / 60;
+    if (elapsed < 0) return { activeBucket: null, matchMinute: null };
+    let minute: number;
+    if (elapsed <= 47) { minute = Math.floor(elapsed); }
+    else if (elapsed <= 62) { minute = 45; }
+    else { minute = Math.floor(elapsed - 15); }
+    return { activeBucket: getActiveBucket(startTimestamp, statusType), matchMinute: Math.min(minute, 90) };
+  };
+
+  const [state, setState] = useState(compute);
+  useEffect(() => {
+    if (statusType !== "inprogress") return;
+    setState(compute());
+    const id = setInterval(() => setState(compute()), 30_000);
+    return () => clearInterval(id);
+  }, [startTimestamp, statusType]);
+  return state;
+}
+// ────────────────────────────────────────────────────────────────────────────
+
 function StadiumSimulationTab({
   eventId,
   homeTeamName,
@@ -3025,7 +3086,10 @@ function StadiumSimulationTab({
   awayTeamId,
   venue,
   city,
+  startTimestamp,
+  statusType,
 }: StadiumSimulationTabProps) {
+  const { activeBucket, matchMinute } = useLiveMatchClock(startTimestamp, statusType);
   const { data, isLoading } = useQuery<LineupsResponse>({
     queryKey: ["/api/event", eventId, "lineups"],
   });
@@ -3171,6 +3235,8 @@ function StadiumSimulationTab({
         awayTeamName={awayTeamName}
         homePatterns={simulationMetrics?.home?.scoringPatterns}
         awayPatterns={simulationMetrics?.away?.scoringPatterns}
+        activeBucket={activeBucket}
+        matchMinute={matchMinute}
       />
 
       <HalfPatternsCard
@@ -4487,12 +4553,64 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     marginBottom: 4,
+    borderRadius: 6,
+    paddingVertical: 2,
+    paddingHorizontal: 2,
+  },
+  patternRowActive: {
+    backgroundColor: "rgba(239,183,0,0.08)",
+    borderWidth: 1,
+    borderColor: "rgba(239,183,0,0.25)",
+  },
+  patternBucketLabelWrap: {
+    width: 60,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+  },
+  patternLiveDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: "#ef4444",
   },
   patternBucketLabel: {
-    width: 54,
     fontSize: 11,
     fontFamily: "Inter_500Medium",
     color: Colors.dark.textSecondary,
+  },
+  patternBucketLabelActive: {
+    color: "#efb700",
+    fontFamily: "Inter_700Bold",
+  },
+  patternCardHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 2,
+  },
+  liveClockPill: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    backgroundColor: "#ef444422",
+    borderRadius: 20,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderWidth: 1,
+    borderColor: "#ef444455",
+  },
+  liveClockDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: "#ef4444",
+  },
+  liveClockText: {
+    fontSize: 10,
+    fontFamily: "Inter_700Bold",
+    color: "#ef4444",
+    letterSpacing: 0.3,
   },
   patternBars: {
     flex: 1,

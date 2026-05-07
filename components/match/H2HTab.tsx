@@ -112,7 +112,7 @@ function SummaryCard({ label, value, color }: { label: string; value: string | n
 
 export default function H2HTab({ eventId, homeTeamId, awayTeamId, homeTeamName, awayTeamName }: H2HTabProps) {
   const { data, isLoading, isError } = useQuery<H2HResponse>({
-    queryKey: ["/api/event", eventId, "h2h/events"],
+    queryKey: ["/api/event", eventId, `h2h/events?homeTeamId=${homeTeamId}&awayTeamId=${awayTeamId}`],
     retry: 1,
   });
 
