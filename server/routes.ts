@@ -25,7 +25,7 @@ import {
 } from "./halfScoringTrainer";
 import { proxyFetch, reloadProxies, getProxyStats } from "./proxyFetch";
 import { scrapeGeonodeProxies } from "./proxyScraper";
-import { torFetch, getTorStatus, rotateTorCircuit } from "./torFetch";
+import { getTorStatus, rotateTorCircuit } from "./torFetch";
 import { ensureTor } from "./torManager";
 
 let _openai: OpenAI | null = null;
@@ -1870,39 +1870,6 @@ async function fetchSofaScore(endpoint: string) {
   const promise = (async () => {
     const url = `${SOFASCORE_API}${endpoint}`;
 
-    // ── Primary path: Tor network ────────────────────────────────────────────
-    // Tor gives us a clean exit IP on every circuit — no per-request delays,
-    // no proxy pool exhaustion, no rate-limit bans. Falls back to the proxy
-    // pool automatically if Tor is still bootstrapping or fails.
-    const torState = getTorStatus();
-    if (torState.status === "ready" || torState.status === "rotating") {
-      try {
-        const res = await torFetch(url, { headers: SOFASCORE_HEADERS });
-        if (res.ok) {
-          const data = await res.json();
-          const entry: CacheEntry = { data, expiresAt: Date.now() + sofaCacheTtl(endpoint) };
-          sofaCache.set(endpoint, entry);
-          saveDiskCache(endpoint, entry);
-          return data;
-        }
-        // 429 or 403 = this exit node is rate-limited / IP-blocked → rotate circuit
-        // and fall through to the proxy pool for this request.
-        if (res.status === 429 || res.status === 403) {
-          rotateTorCircuit().catch(() => {});
-        }
-        // 404 = resource truly doesn't exist — no point trying proxy
-        if (res.status === 404) {
-          throw new Error(`SofaScore API error: ${res.status}`);
-        }
-        // All other non-ok statuses (403, 429, 5xx…): fall through to proxy pool
-      } catch (torErr: any) {
-        if (torErr.message?.includes("SofaScore API error:")) throw torErr;
-        // Tor failed (network issue, etc.) — fall through to proxy pool
-        console.warn(`[tor] Fetch failed for ${endpoint}: ${torErr.message} — falling back to proxy pool`);
-      }
-    }
-
-    // ── Fallback path: rotating proxy pool ───────────────────────────────────
     const res = await proxyFetch(url, { headers: SOFASCORE_HEADERS });
     if (!res.ok) {
       throw new Error(`SofaScore API error: ${res.status}`);
