@@ -1,1 +1,0 @@
-{"endpoint":"/event/14900154/statistics","data":{"statistics":[{"period":"ALL","groups":[{"groupName":"Match overview","statisticsItems":[{"name":"Red cards","home":"0","away":"1","compareCode":2,"statisticsType":"negative","valueType":"event","homeValue":0,"awayValue":1,"renderType":1,"key":"redCards"}]}]}]},"expiresAt":1778170306379}
