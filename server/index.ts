@@ -264,7 +264,7 @@ function setupErrorHandler(app: express.Application) {
   });
 }
 
-const PROXY_REFRESH_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
+const PROXY_REFRESH_INTERVAL_MS = 15 * 60 * 1000;
 const PROXIES_PATH = path.join(process.cwd(), "data", "proxies.json");
 
 function getProxyFileAgeMs(): number {
@@ -317,12 +317,10 @@ function scheduleProxyRefresh() {
     () => {
       log(`express server serving on port ${port}`);
 
-      // Start Tor in background immediately so it's ready before the first request
       ensureTor()
         .then(() => log("[tor] ✅ Background bootstrap complete"))
         .catch((err: any) => log(`[tor] Bootstrap error: ${err.message}`));
 
-      // Refresh proxies on startup if stale (older than 15 minutes or missing)
       const ageMs = getProxyFileAgeMs();
       if (ageMs > PROXY_REFRESH_INTERVAL_MS) {
         log(`[proxy-auto] Proxy list is ${Math.round(ageMs / 60000)}m old — refreshing now…`);
@@ -331,7 +329,6 @@ function scheduleProxyRefresh() {
         log(`[proxy-auto] Proxy list is fresh (${Math.round(ageMs / 60000)}m old) — skipping initial refresh.`);
       }
 
-      // Schedule recurring refresh every 15 minutes
       scheduleProxyRefresh();
     },
   );

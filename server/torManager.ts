@@ -12,7 +12,7 @@ const DATA_DIR  = path.join(process.cwd(), "data", "tor-data");
 const SOCKS_PORT   = 9050;
 const CONTROL_PORT = 9051;
 const BOOTSTRAP_TIMEOUT_MS  = 120_000;
-const AUTO_ROTATE_INTERVAL_MS = 10 * 60 * 1000; // rotate exit IP every 10 minutes
+const AUTO_ROTATE_INTERVAL_MS = 10 * 60 * 1000;
 
 export type TorStatus = "idle" | "bootstrapping" | "ready" | "rotating" | "error";
 
@@ -24,27 +24,22 @@ let circuitNum    = 0;
 let startPromise: Promise<void> | null = null;
 let rotateTimer: ReturnType<typeof setInterval> | null = null;
 
-// ── Tor SOCKS5 agent (port 9050) ──────────────────────────────────────────────
 export function getTorAgent(): SocksProxyAgent {
   return new SocksProxyAgent(`socks5h://127.0.0.1:${SOCKS_PORT}`);
 }
 
-// ── Status snapshot ───────────────────────────────────────────────────────────
 export function getTorStatus() {
   return { status: torStatus, bootstrapPct, exitIp: torExitIp, circuitNum };
 }
 
-// ── Ensure Tor is running — idempotent ────────────────────────────────────────
 export async function ensureTor(): Promise<void> {
   if (torStatus === "ready" || torStatus === "rotating") return;
   if (startPromise) return startPromise;
-  // Allow retry after error
   if (torStatus === "error") { startPromise = null; }
   startPromise = _startTor();
   return startPromise;
 }
 
-// ── Rotate circuit (NEWNYM via control port) ──────────────────────────────────
 export async function rotateTorCircuit(): Promise<void> {
   if (torStatus !== "ready" && torStatus !== "rotating") return;
   const prev = torStatus;
@@ -60,14 +55,12 @@ export async function rotateTorCircuit(): Promise<void> {
   }
 }
 
-// ── Internal: start Tor ───────────────────────────────────────────────────────
 async function _startTor(): Promise<void> {
   if (torStatus === "ready") return;
   torStatus = "bootstrapping";
   bootstrapPct = 0;
   console.log("[tor] Starting Tor daemon…");
 
-  // Kill any lingering Tor process on our ports
   try { await _sendControlCommand("SIGNAL SHUTDOWN\r\n"); } catch {}
   await new Promise(r => setTimeout(r, 500));
 
@@ -78,7 +71,6 @@ async function _startTor(): Promise<void> {
     "--DataDirectory",        DATA_DIR,
     "--GeoIPFile",            GEOIP,
     "--GeoIPv6File",          GEOIP6,
-    // No --Quiet: we need bootstrap notices on stdout
   ], {
     env: {
       ...process.env,
@@ -113,7 +105,6 @@ async function _startTor(): Promise<void> {
       }
     };
 
-    // Tor writes logs to BOTH stdout and stderr depending on config
     let stdoutBuf = "";
     torProcess!.stdout?.on("data", (chunk: Buffer) => {
       stdoutBuf += chunk.toString();
@@ -156,7 +147,6 @@ async function _startTor(): Promise<void> {
   });
 }
 
-// ── Auto-rotate timer ─────────────────────────────────────────────────────────
 function _startAutoRotate(): void {
   _stopAutoRotate();
   rotateTimer = setInterval(async () => {
@@ -178,7 +168,6 @@ function _stopAutoRotate(): void {
   }
 }
 
-// ── Control port ──────────────────────────────────────────────────────────────
 function _sendControlCommand(cmd: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const socket = net.createConnection(CONTROL_PORT, "127.0.0.1", () => {
@@ -194,12 +183,9 @@ function _sendControlCommand(cmd: string): Promise<void> {
   });
 }
 
-// ── Discover current exit IP ──────────────────────────────────────────────────
 async function _fetchExitIp(): Promise<void> {
   try {
     const agent = getTorAgent();
-    const { SocksProxyAgent: _Unused, ..._ } = { SocksProxyAgent, _: 1 };
-    // Use node's https directly so we can pass the agent
     const https = await import("node:https");
     await new Promise<void>((resolve) => {
       const req = https.default.get(
@@ -226,6 +212,5 @@ async function _fetchExitIp(): Promise<void> {
   }
 }
 
-// ── Cleanup ───────────────────────────────────────────────────────────────────
-process.on("exit",   () => { try { torProcess?.kill(); } catch {} });
-process.on("SIGTERM",() => { try { torProcess?.kill(); } catch {} });
+process.on("exit",    () => { try { torProcess?.kill(); } catch {} });
+process.on("SIGTERM", () => { try { torProcess?.kill(); } catch {} });

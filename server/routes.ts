@@ -1871,9 +1871,6 @@ async function fetchSofaScore(endpoint: string) {
     const url = `${SOFASCORE_API}${endpoint}`;
 
     // ── Primary path: Tor network ────────────────────────────────────────────
-    // Tor gives us a clean exit IP on every circuit — no per-request delays,
-    // no proxy pool exhaustion, no rate-limit bans. Falls back to the proxy
-    // pool automatically if Tor is still bootstrapping or fails.
     const torState = getTorStatus();
     if (torState.status === "ready" || torState.status === "rotating") {
       try {
@@ -1885,19 +1882,14 @@ async function fetchSofaScore(endpoint: string) {
           saveDiskCache(endpoint, entry);
           return data;
         }
-        // 429 or 403 = this exit node is rate-limited / IP-blocked → rotate circuit
-        // and fall through to the proxy pool for this request.
         if (res.status === 429 || res.status === 403) {
           rotateTorCircuit().catch(() => {});
         }
-        // 404 = resource truly doesn't exist — no point trying proxy
         if (res.status === 404) {
           throw new Error(`SofaScore API error: ${res.status}`);
         }
-        // All other non-ok statuses (403, 429, 5xx…): fall through to proxy pool
       } catch (torErr: any) {
         if (torErr.message?.includes("SofaScore API error:")) throw torErr;
-        // Tor failed (network issue, etc.) — fall through to proxy pool
         console.warn(`[tor] Fetch failed for ${endpoint}: ${torErr.message} — falling back to proxy pool`);
       }
     }
@@ -4249,10 +4241,53 @@ export async function registerRoutes(app: Express): Promise<Server> {
     "/api/event/:eventId/h2h/events",
     async (req: Request, res: Response) => {
       try {
-        const data = await fetchSofaScoreOptional(
-          `/event/${req.params.eventId}/h2h/events`,
-        );
-        res.json(data ?? { events: [] });
+        const { eventId } = req.params;
+        const homeTeamId = req.query.homeTeamId ? String(req.query.homeTeamId) : null;
+        const awayTeamId = req.query.awayTeamId ? String(req.query.awayTeamId) : null;
+
+        // Primary H2H fetch
+        const data = (await fetchSofaScoreOptional(`/event/${eventId}/h2h/events`)) ?? {};
+
+        const result: {
+          events: any[];
+          homeTeamEvents: any[];
+          awayTeamEvents: any[];
+        } = {
+          events: data.events ?? [],
+          homeTeamEvents: data.homeTeamEvents ?? [],
+          awayTeamEvents: data.awayTeamEvents ?? [],
+        };
+
+        // If SofaScore didn't return team-specific recent form, fetch it separately
+        if (result.homeTeamEvents.length === 0 && homeTeamId) {
+          try {
+            const [p0, p1] = await Promise.all([
+              fetchSofaScoreOptional(`/team/${homeTeamId}/events/last/0`),
+              fetchSofaScoreOptional(`/team/${homeTeamId}/events/last/1`),
+            ]);
+            const raw = [...(p0?.events ?? []), ...(p1?.events ?? [])];
+            result.homeTeamEvents = raw
+              .filter((e: any) => e.status?.type === "finished")
+              .sort((a: any, b: any) => b.startTimestamp - a.startTimestamp)
+              .slice(0, 10);
+          } catch { /* optional */ }
+        }
+
+        if (result.awayTeamEvents.length === 0 && awayTeamId) {
+          try {
+            const [p0, p1] = await Promise.all([
+              fetchSofaScoreOptional(`/team/${awayTeamId}/events/last/0`),
+              fetchSofaScoreOptional(`/team/${awayTeamId}/events/last/1`),
+            ]);
+            const raw = [...(p0?.events ?? []), ...(p1?.events ?? [])];
+            result.awayTeamEvents = raw
+              .filter((e: any) => e.status?.type === "finished")
+              .sort((a: any, b: any) => b.startTimestamp - a.startTimestamp)
+              .slice(0, 10);
+          } catch { /* optional */ }
+        }
+
+        res.json(result);
       } catch (error: any) {
         res.status(500).json({ error: error.message });
       }
@@ -5135,12 +5170,33 @@ Format with clear markdown headings (### for sections). Keep it punchy but thoro
     result: null,
   };
 
+  // ── Train-All-Outcomes state ───────────────────────────────────────────────
+  type AllOutcomesTrainState = {
+    running: boolean;
+    totalBuckets: number;
+    completedBuckets: number;
+    currentBucket: string | null;
+    progress: number;
+    message: string;
+    error: string | null;
+    results: string[];
+  };
+  const allOutcomesTrainState: AllOutcomesTrainState = {
+    running: false,
+    totalBuckets: 0,
+    completedBuckets: 0,
+    currentBucket: null,
+    progress: 0,
+    message: "",
+    error: null,
+    results: [],
+  };
+
   // ── HSH training state ────────────────────────────────────────────────────
   type HSHTrainState = { running: boolean; progress: number; message: string; error: string | null };
   const hshTrainState: HSHTrainState = { running: false, progress: 0, message: "", error: null };
 
   app.get("/api/engine/outcome-buckets", (_req: Request, res: Response) => {
-    // Return all buckets with sample counts and trained-model summary
     const trained: any[] = db.prepare(`
       SELECT bucket, sample_count, train_hits, false_positives,
              train_accuracy, fp_rate, trained_at
@@ -5148,23 +5204,21 @@ Format with clear markdown headings (### for sections). Keep it punchy but thoro
     `).all();
     const trainedMap = new Map<string, any>(trained.map((t) => [t.bucket, t]));
     const buckets = SCORE_BUCKETS.map((b) => {
-      // Count matches in DB matching this bucket
-      let count = 0;
-      for (const [sh, sa] of b.scores) {
-        const r: any = db.prepare(
-          `SELECT COUNT(*) c FROM match_simulations
-           WHERE home_goals = ? AND away_goals = ?
-             AND home_avg_xg IS NOT NULL AND away_avg_xg IS NOT NULL`
-        ).get(sh, sa);
-        count += r?.c || 0;
-      }
+      const r: any = db.prepare(
+        `SELECT COUNT(*) c FROM match_simulations
+         WHERE home_goals = ? AND away_goals = ?
+           AND home_avg_xg IS NOT NULL AND away_avg_xg IS NOT NULL`
+      ).get(b.homeGoals, b.awayGoals);
+      const count = r?.c || 0;
       const t = trainedMap.get(b.id);
       return {
         id: b.id,
         label: b.label,
         scores: b.scores,
+        homeGoals: b.homeGoals,
+        awayGoals: b.awayGoals,
         sum: b.sum,
-        absDiff: b.absDiff,
+        signedDiff: b.signedDiff,
         sampleCount: count,
         trained: !!t,
         trainAccuracy: t?.train_accuracy ?? null,
@@ -5223,6 +5277,70 @@ Format with clear markdown headings (### for sections). Keep it punchy but thoro
     })();
 
     res.json({ started: true, bucket });
+  });
+
+  // ── Train ALL eligible buckets sequentially ───────────────────────────────
+  app.post("/api/engine/train-all-outcomes", async (_req: Request, res: Response) => {
+    if (allOutcomesTrainState.running || outcomeTrainState.running) {
+      return res.status(409).json({ error: "Training already in progress" });
+    }
+
+    // Find buckets with >= 5 samples
+    const eligible = SCORE_BUCKETS.filter((b) => {
+      const r: any = db.prepare(
+        `SELECT COUNT(*) c FROM match_simulations WHERE home_goals = ? AND away_goals = ? AND home_avg_xg IS NOT NULL`
+      ).get(b.homeGoals, b.awayGoals);
+      return (r?.c ?? 0) >= 5;
+    });
+
+    if (eligible.length === 0) {
+      return res.status(400).json({
+        error: "No buckets have enough samples (need ≥ 5 matches each). Bulk-upload more dates first.",
+      });
+    }
+
+    allOutcomesTrainState.running          = true;
+    allOutcomesTrainState.totalBuckets     = eligible.length;
+    allOutcomesTrainState.completedBuckets = 0;
+    allOutcomesTrainState.currentBucket    = null;
+    allOutcomesTrainState.progress         = 0;
+    allOutcomesTrainState.message          = `Starting all-outcomes training for ${eligible.length} eligible buckets…`;
+    allOutcomesTrainState.error            = null;
+    allOutcomesTrainState.results          = [];
+
+    (async () => {
+      for (let i = 0; i < eligible.length; i++) {
+        const b = eligible[i];
+        allOutcomesTrainState.currentBucket = b.id;
+        allOutcomesTrainState.message       = `Training ${i + 1}/${eligible.length}: ${b.label}…`;
+
+        try {
+          const trained = await trainBucket({
+            bucketId:   b.id,
+            onProgress: (pct, msg) => {
+              allOutcomesTrainState.message  = `[${b.label}] ${msg}`;
+              allOutcomesTrainState.progress = Math.round(((i + pct / 100) / eligible.length) * 100);
+            },
+          });
+          allOutcomesTrainState.results.push(
+            `✓ ${b.label}: ${(trained.trainAccuracy * 100).toFixed(1)}% acc, ${(trained.fpRate * 100).toFixed(1)}% fp`
+          );
+        } catch (err: any) {
+          allOutcomesTrainState.results.push(`✗ ${b.label}: ${err.message}`);
+        }
+        allOutcomesTrainState.completedBuckets = i + 1;
+      }
+      allOutcomesTrainState.running       = false;
+      allOutcomesTrainState.progress      = 100;
+      allOutcomesTrainState.currentBucket = null;
+      allOutcomesTrainState.message       = `Done. Trained ${allOutcomesTrainState.completedBuckets}/${allOutcomesTrainState.totalBuckets} buckets.`;
+    })();
+
+    res.json({ started: true, buckets: eligible.length });
+  });
+
+  app.get("/api/engine/all-outcomes-progress", (_req: Request, res: Response) => {
+    res.json(allOutcomesTrainState);
   });
 
   app.get("/api/engine/outcome-model/:bucket", (req: Request, res: Response) => {
@@ -5430,11 +5548,8 @@ Format with clear markdown headings (### for sections). Keep it punchy but thoro
         }
       } catch { /* use uniform defaults */ }
 
-      // ── Split each bucket prediction into per-scoreline entries ───────────
-      // Draw buckets (scores like [[1,1]]) stay as one entry.
-      // Asymmetric buckets (scores like [[2,1],[1,2]]) are split into:
-      //   home-win entry  (confidence × homeWinProb / (homeWinProb + awayWinProb))
-      //   away-win entry  (confidence × awayWinProb / (homeWinProb + awayWinProb))
+      // ── Each bucket is now a unique (homeGoals, awayGoals) scoreline ─────────
+      // No split needed — confidence is weighted by the matching result probability.
       interface ScoреlinePrediction {
         scoreline: string;
         homeGoals: number;
@@ -5450,63 +5565,30 @@ Format with clear markdown headings (### for sections). Keep it punchy but thoro
         rawDiff: number;
       }
 
-      const scorelines: ScoреlinePrediction[] = [];
-      for (const p of predictions) {
-        const isDraw = p.scores.length === 1 && p.scores[0][0] === p.scores[0][1];
-        if (isDraw) {
-          const [h, a] = p.scores[0];
-          scorelines.push({
-            scoreline: `${h}-${a}`,
-            homeGoals: h,
-            awayGoals: a,
-            outcome: "Draw",
-            outcomeConfidence: Math.round(p.confidence * drawProb * 10) / 10,
-            bucketConfidence: p.confidence,
-            bucketId: p.bucketId,
-            isExactHit: p.isExactHit,
-            trainAccuracy: p.trainAccuracy,
-            fpRate: p.fpRate,
-            rawSum: p.rawSum,
-            rawDiff: p.rawDiff,
-          });
-        } else {
-          // Split into home-win + away-win using xG direction probabilities
-          const dirTotal = homeWinProb + awayWinProb || 1;
-          const homeShare = homeWinProb / dirTotal;
-          const awayShare = awayWinProb / dirTotal;
-          // Pick the scoreline where homeGoals > awayGoals for home win, and vice versa
-          const homeWinScore = p.scores.find(([h, a]) => h > a) ?? p.scores[0];
-          const awayWinScore = p.scores.find(([h, a]) => a > h) ?? p.scores[1] ?? p.scores[0];
-          scorelines.push({
-            scoreline: `${homeWinScore[0]}-${homeWinScore[1]}`,
-            homeGoals: homeWinScore[0],
-            awayGoals: homeWinScore[1],
-            outcome: "Home Win",
-            outcomeConfidence: Math.round(p.confidence * homeShare * 10) / 10,
-            bucketConfidence: p.confidence,
-            bucketId: p.bucketId,
-            isExactHit: p.isExactHit && p.roundedSum === homeWinScore[0] + homeWinScore[1],
-            trainAccuracy: p.trainAccuracy,
-            fpRate: p.fpRate,
-            rawSum: p.rawSum,
-            rawDiff: p.rawDiff,
-          });
-          scorelines.push({
-            scoreline: `${awayWinScore[0]}-${awayWinScore[1]}`,
-            homeGoals: awayWinScore[0],
-            awayGoals: awayWinScore[1],
-            outcome: "Away Win",
-            outcomeConfidence: Math.round(p.confidence * awayShare * 10) / 10,
-            bucketConfidence: p.confidence,
-            bucketId: p.bucketId,
-            isExactHit: p.isExactHit && p.roundedSum === awayWinScore[0] + awayWinScore[1],
-            trainAccuracy: p.trainAccuracy,
-            fpRate: p.fpRate,
-            rawSum: p.rawSum,
-            rawDiff: p.rawDiff,
-          });
-        }
-      }
+      const scorelines: ScoреlinePrediction[] = predictions.map((p) => {
+        const h = p.homeGoals;
+        const a = p.awayGoals;
+        const outcome: "Home Win" | "Away Win" | "Draw" =
+          h > a ? "Home Win" : h < a ? "Away Win" : "Draw";
+        const resultProb =
+          outcome === "Home Win" ? homeWinProb :
+          outcome === "Away Win" ? awayWinProb : drawProb;
+        const outcomeConfidence = Math.round(p.confidence * resultProb * 10) / 10;
+        return {
+          scoreline: `${h}-${a}`,
+          homeGoals: h,
+          awayGoals: a,
+          outcome,
+          outcomeConfidence,
+          bucketConfidence: p.confidence,
+          bucketId: p.bucketId,
+          isExactHit: p.isExactHit,
+          trainAccuracy: p.trainAccuracy,
+          fpRate: p.fpRate,
+          rawSum: p.rawSum,
+          rawDiff: p.rawDiff,
+        };
+      });
 
       // Sort by outcomeConfidence descending
       scorelines.sort((a, b) => b.outcomeConfidence - a.outcomeConfidence);

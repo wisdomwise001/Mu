@@ -8,8 +8,6 @@ export { getTorStatus, rotateTorCircuit };
 
 const REQUEST_TIMEOUT_MS = 30_000;
 
-// Cap concurrent Tor streams — a single Tor circuit handles ~8–10 streams well.
-// Beyond that, queuing inside Tor causes cascading timeouts.
 const torConcurrency = pLimit(8);
 
 export type SimpleResponse = {
@@ -21,15 +19,11 @@ export type SimpleResponse = {
   json: () => Promise<any>;
 };
 
-// ── Core fetch through Tor SOCKS5 proxy ──────────────────────────────────────
 export async function torFetch(
   url: string,
   init: { headers?: Record<string, string> } = {}
 ): Promise<SimpleResponse> {
   await ensureTor();
-
-  // Serialize through the concurrency cap — callers that exceed the cap queue
-  // here rather than hammering the Tor circuit simultaneously.
   return torConcurrency(() => _doTorFetch(url, init));
 }
 
@@ -60,8 +54,8 @@ function _doTorFetch(
       let stream: NodeJS.ReadableStream = res;
 
       const enc = (res.headers["content-encoding"] || "").toLowerCase();
-      if (enc === "gzip")    stream = res.pipe(zlib.createGunzip());
-      else if (enc === "br") stream = res.pipe(zlib.createBrotliDecompress());
+      if (enc === "gzip")         stream = res.pipe(zlib.createGunzip());
+      else if (enc === "br")      stream = res.pipe(zlib.createBrotliDecompress());
       else if (enc === "deflate") stream = res.pipe(zlib.createInflate());
 
       stream.on("data", (chunk: Buffer) => chunks.push(chunk));

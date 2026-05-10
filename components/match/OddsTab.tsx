@@ -26,6 +26,23 @@ interface OddsTabProps {
   eventId: string;
 }
 
+function fractionalToDecimal(fractional: string): string {
+  if (!fractional || fractional === "-" || fractional === "N/A") return fractional;
+  const f = fractional.trim().toLowerCase();
+  if (f === "evs" || f === "ev") return "2.00";
+  if (f.includes("/")) {
+    const parts = f.split("/");
+    const num = parseFloat(parts[0]);
+    const den = parseFloat(parts[1]);
+    if (!isNaN(num) && !isNaN(den) && den !== 0) {
+      return (num / den + 1).toFixed(2);
+    }
+  }
+  const num = parseFloat(f);
+  if (!isNaN(num)) return (num + 1).toFixed(2);
+  return fractional;
+}
+
 function OddsTab({ eventId }: OddsTabProps) {
   const { data, isLoading } = useQuery<{ markets: OddsMarket[] }>({
     queryKey: ["/api/event", eventId, "odds", "1", "all"],
@@ -51,6 +68,10 @@ function OddsTab({ eventId }: OddsTabProps) {
 
   return (
     <ScrollView style={styles.container} showsVerticalScrollIndicator={false}>
+      <View style={styles.decimalNote}>
+        <Ionicons name="information-circle-outline" size={13} color={Colors.dark.textSecondary} />
+        <Text style={styles.decimalNoteText}>Decimal odds</Text>
+      </View>
       {markets.map((market, index) => (
         <MarketCard key={`${market.marketId}-${index}`} market={market} />
       ))}
@@ -68,7 +89,7 @@ const MarketCard = memo(({ market }: { market: OddsMarket }) => {
           <View key={index} style={styles.choiceItem}>
             <Text style={styles.choiceName}>{choice.name}</Text>
             <View style={styles.choiceValueRow}>
-              <Text style={styles.choiceValue}>{choice.fractionalValue}</Text>
+              <Text style={styles.choiceValue}>{fractionalToDecimal(choice.fractionalValue)}</Text>
               {choice.change !== 0 && (
                 <Ionicons
                   name={choice.change === 1 ? "caret-up" : "caret-down"}
@@ -104,6 +125,18 @@ const styles = StyleSheet.create({
   },
   emptyText: {
     fontSize: 14,
+    fontFamily: "Inter_400Regular",
+    color: Colors.dark.textSecondary,
+  },
+  decimalNote: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+  },
+  decimalNoteText: {
+    fontSize: 11,
     fontFamily: "Inter_400Regular",
     color: Colors.dark.textSecondary,
   },
