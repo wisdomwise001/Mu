@@ -27,6 +27,7 @@ import { proxyFetch, reloadProxies, getProxyStats } from "./proxyFetch";
 import { scrapeGeonodeProxies } from "./proxyScraper";
 import { torFetch, getTorStatus, rotateTorCircuit } from "./torFetch";
 import { ensureTor } from "./torManager";
+import { runHierarchicalPrediction } from "./hierarchicalPredictor";
 
 let _openai: OpenAI | null = null;
 function getOpenAI(): OpenAI {
@@ -6505,6 +6506,183 @@ Format with clear markdown headings (### for sections). Keep it punchy but thoro
     if (!job) return res.status(404).json({ error: "Job not found" });
     job.cancelRequested = true;
     res.json({ success: true });
+  });
+
+  // ─── Hierarchical Prediction Engine ──────────────────────────────────────
+  // 6-stage prediction: Completeness → Identity → Bucket Family →
+  //   Outlier → Psychology → Final Rank
+  app.get("/api/event/:eventId/hierarchical-prediction", async (req: Request, res: Response) => {
+    try {
+      const models = loadAllBucketModels();
+      if (models.length === 0) {
+        return res.status(400).json({
+          error: "No bucket models trained yet. Train at least one bucket model from the Engine tab first.",
+        });
+      }
+
+      const eventId = Number(req.params.eventId);
+      const homeTeamId = Number(req.query.homeTeamId) || 0;
+      const awayTeamId = Number(req.query.awayTeamId) || 0;
+
+      if (!homeTeamId || !awayTeamId) {
+        return res.status(400).json({ error: "homeTeamId and awayTeamId are required." });
+      }
+
+      const serverPort = process.env.PORT || 5000;
+      const baseUrl = `http://localhost:${serverPort}`;
+
+      // Fetch live simulation (same call used by existing predictor)
+      let row: Record<string, any> | null = null;
+      let dataSource: "live" | "database" = "live";
+
+      try {
+        const simRes = await fetch(
+          `${baseUrl}/api/event/${eventId}/player-simulation?homeTeamId=${homeTeamId}&awayTeamId=${awayTeamId}`,
+          { signal: AbortSignal.timeout(90000) }
+        );
+        if (simRes.ok) {
+          const sim: any = await simRes.json();
+          const h = sim.home;
+          const a = sim.away;
+          const hStats   = h?.teamMatchStats?.all;
+          const hStats1h = h?.teamMatchStats?.firstHalf;
+          const hStats2h = h?.teamMatchStats?.secondHalf;
+          const aStats   = a?.teamMatchStats?.all;
+          const aStats1h = a?.teamMatchStats?.firstHalf;
+          const aStats2h = a?.teamMatchStats?.secondHalf;
+          const hPhase   = h?.phaseStrengths;
+          const aPhase   = a?.phaseStrengths;
+          const hForm    = h?.formSummary;
+          const aForm    = a?.formSummary;
+
+          // Fetch half-context for ctx_ features
+          let ctx: any = {};
+          try {
+            const ctxRes = await fetch(`${baseUrl}/api/event/${eventId}/half-context`, { signal: AbortSignal.timeout(30000) });
+            if (ctxRes.ok) ctx = await ctxRes.json();
+          } catch { /* ctx stays {} */ }
+
+          row = {
+            event_id: eventId,
+            home_team_id: homeTeamId,
+            away_team_id: awayTeamId,
+            home_avg_xg:               hStats?.avgXg               ?? null,
+            home_avg_goals_scored:     hStats?.avgGoalsScored       ?? null,
+            home_avg_goals_conceded:   hStats?.avgGoalsConceded     ?? null,
+            home_avg_big_chances:      hStats?.avgBigChances        ?? null,
+            home_avg_total_shots:      hStats?.avgTotalShots        ?? null,
+            home_avg_shots_on_target:  hStats?.avgShotsOnTarget     ?? null,
+            home_avg_possession:       hStats?.avgPossession        ?? null,
+            away_avg_xg:               aStats?.avgXg               ?? null,
+            away_avg_goals_scored:     aStats?.avgGoalsScored       ?? null,
+            away_avg_goals_conceded:   aStats?.avgGoalsConceded     ?? null,
+            away_avg_big_chances:      aStats?.avgBigChances        ?? null,
+            away_avg_total_shots:      aStats?.avgTotalShots        ?? null,
+            away_avg_shots_on_target:  aStats?.avgShotsOnTarget     ?? null,
+            away_avg_possession:       aStats?.avgPossession        ?? null,
+            home_h1_avg_goals_scored:  hStats1h?.avgGoalsScored     ?? null,
+            home_h1_avg_xg:            hStats1h?.avgXg              ?? null,
+            home_h1_avg_total_shots:   hStats1h?.avgTotalShots      ?? null,
+            home_h2_avg_goals_scored:  hStats2h?.avgGoalsScored     ?? null,
+            home_h2_avg_xg:            hStats2h?.avgXg              ?? null,
+            home_h2_avg_total_shots:   hStats2h?.avgTotalShots      ?? null,
+            away_h1_avg_goals_scored:  aStats1h?.avgGoalsScored     ?? null,
+            away_h1_avg_xg:            aStats1h?.avgXg              ?? null,
+            away_h1_avg_total_shots:   aStats1h?.avgTotalShots      ?? null,
+            away_h2_avg_goals_scored:  aStats2h?.avgGoalsScored     ?? null,
+            away_h2_avg_xg:            aStats2h?.avgXg              ?? null,
+            away_h2_avg_total_shots:   aStats2h?.avgTotalShots      ?? null,
+            home_form_strength:        h?.formStrength              ?? null,
+            home_scoring_strength:     h?.scoringStrength           ?? null,
+            home_defending_strength:   h?.defendingStrength         ?? null,
+            home_form_points:          hForm?.formPoints            ?? null,
+            home_clean_sheets:         hForm?.cleanSheets           ?? null,
+            home_matches_analyzed:     h?.matchesAnalyzed           ?? 15,
+            away_form_strength:        a?.formStrength              ?? null,
+            away_scoring_strength:     a?.scoringStrength           ?? null,
+            away_defending_strength:   a?.defendingStrength         ?? null,
+            away_form_points:          aForm?.formPoints            ?? null,
+            away_clean_sheets:         aForm?.cleanSheets           ?? null,
+            away_matches_analyzed:     a?.matchesAnalyzed           ?? 15,
+            home_phase_attack:         hPhase?.attackStrength       ?? null,
+            home_phase_defensive:      hPhase?.defensiveStrength    ?? null,
+            away_phase_attack:         aPhase?.attackStrength       ?? null,
+            away_phase_defensive:      aPhase?.defensiveStrength    ?? null,
+            home_injury_impact:        h?.injuryImpact              ?? 0,
+            away_injury_impact:        a?.injuryImpact              ?? 0,
+            ctx_is_knockout:           ctx.isKnockout               ?? 0,
+            ctx_is_second_leg:         ctx.isSecondLeg              ?? 0,
+            ctx_agg_lead_goals:        ctx.aggLeadGoals             ?? 0,
+            ctx_trailing_needs_goals:  ctx.trailingNeedsGoals       ?? 0,
+            ctx_home_motivation:       ctx.homeMotivation           ?? 0,
+            ctx_away_motivation:       ctx.awayMotivation           ?? 0,
+            ctx_motivation_asymmetry:  ctx.motivationAsymmetry      ?? 0,
+            ctx_home_fatigue_index:    ctx.homeFatigueIndex         ?? 0,
+            ctx_away_fatigue_index:    ctx.awayFatigueIndex         ?? 0,
+            ctx_fatigue_asymmetry:     ctx.fatigueAsymmetry         ?? 0,
+            ctx_home_avg_first_sub:    ctx.homeAvgFirstSub          ?? 0,
+            ctx_away_avg_first_sub:    ctx.awayAvgFirstSub          ?? 0,
+            ctx_home_late_subs_rate:   ctx.homeLateSubsRate         ?? 0,
+            ctx_away_late_subs_rate:   ctx.awayLateSubsRate         ?? 0,
+            ctx_home_conservative_coach: ctx.homeConservativeCoach  ?? 0,
+            ctx_away_conservative_coach: ctx.awayConservativeCoach  ?? 0,
+            ctx_style_clash_weight:    ctx.styleClashWeight         ?? 0,
+            ctx_odds_home_win:         ctx.oddsHomeWin              ?? 0,
+            ctx_odds_draw:             ctx.oddsDraw                 ?? 0,
+            ctx_odds_away_win:         ctx.oddsAwayWin              ?? 0,
+            ctx_odds_gap:              ctx.oddsGap                  ?? 0,
+            ctx_stage_modifier:        ctx.stageModifier            ?? 0,
+            ctx_signal_first_weight:   ctx.signalFirstWeight        ?? 0,
+            ctx_signal_second_weight:  ctx.signalSecondWeight       ?? 0,
+            ctx_signal_draw_weight:    ctx.signalDrawWeight         ?? 0,
+            ctx_knockout_stage:        ctx.knockoutStage            ?? null,
+            ctx_home_pressure_status:  ctx.homePressureStatus       ?? null,
+            ctx_away_pressure_status:  ctx.awayPressureStatus       ?? null,
+          };
+          dataSource = "live";
+        }
+      } catch { /* fall through to DB */ }
+
+      // Fallback: try stored DB row
+      if (!row) {
+        const dbRow: any = db.prepare("SELECT * FROM match_simulations WHERE event_id = ?").get(eventId);
+        if (!dbRow) {
+          return res.status(404).json({ error: "Could not fetch live match data and no stored row found. Try bulk-uploading this match from the Processing tab first." });
+        }
+        row = dbRow as Record<string, any>;
+        dataSource = "database";
+      }
+
+      // Fetch xG result probabilities for market weighting
+      let homeWinProb = 0.34, drawProb = 0.33, awayWinProb = 0.33;
+      try {
+        const xgRes = await fetch(
+          `${baseUrl}/api/engine/predict/${eventId}?homeTeamId=${homeTeamId}&awayTeamId=${awayTeamId}`,
+          { signal: AbortSignal.timeout(15000) }
+        );
+        if (xgRes.ok) {
+          const xg: any = await xgRes.json();
+          const rp = xg?.prediction?.derived?.resultProbabilities;
+          if (rp) {
+            homeWinProb = rp.home ?? homeWinProb;
+            drawProb    = rp.draw ?? drawProb;
+            awayWinProb = rp.away ?? awayWinProb;
+          }
+        }
+      } catch { /* use uniform defaults */ }
+
+      const result = await runHierarchicalPrediction(eventId, row, models, {
+        homeWinProb,
+        drawProb,
+        awayWinProb,
+        dataSource,
+      });
+
+      res.json(result);
+    } catch (err: any) {
+      console.error("[hierarchical-prediction] error:", err.message);
+      res.status(500).json({ error: err.message || "Hierarchical prediction failed" });
+    }
   });
 
   const httpServer = createServer(app);

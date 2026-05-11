@@ -25,8 +25,9 @@ import AIInsightTab from "@/components/match/AIInsightTab";
 import XGEngineTab from "@/components/match/XGEngineTab";
 import ScorePredictionTab from "@/components/match/ScorePredictionTab";
 import H2HTab from "@/components/match/H2HTab";
+import HierarchicalPredictionTab from "@/components/match/HierarchicalPredictionTab";
 
-const TABS = ["Details", "Lineups", "Simulation", "Statistics", "Standings", "H2H", "Matches", "Odds", "AI Insight", "xG Engine", "Score Predict"] as const;
+const TABS = ["Details", "Lineups", "Simulation", "Statistics", "Standings", "H2H", "Matches", "Odds", "AI Insight", "xG Engine", "Score Predict", "Smart Predict"] as const;
 type TabName = (typeof TABS)[number];
 
 interface EventResponse {
@@ -280,6 +281,15 @@ export default function MatchDetailScreen() {
         )}
         {activeTab === "Score Predict" && (
           <ScorePredictionTab
+            eventId={eventId}
+            homeTeamId={homeTeamId || undefined}
+            awayTeamId={awayTeamId || undefined}
+            homeTeamName={homeTeamName}
+            awayTeamName={awayTeamName}
+          />
+        )}
+        {activeTab === "Smart Predict" && (
+          <HierarchicalPredictionTab
             eventId={eventId}
             homeTeamId={homeTeamId || undefined}
             awayTeamId={awayTeamId || undefined}
