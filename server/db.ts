@@ -327,6 +327,22 @@ db.exec(`
   )
 `);
 
+// ── Behavioral model storage ───────────────────────────────────────────────
+// Stores all 7 hierarchical behavioral models:
+// winner, goal_range, btts, tempo, family, exact_<familyId>
+db.exec(`
+  CREATE TABLE IF NOT EXISTS engine_behavioral_models (
+    model_type       TEXT PRIMARY KEY,
+    weights          TEXT NOT NULL,
+    classes          TEXT NOT NULL,
+    sample_count     INTEGER NOT NULL,
+    true_match_count INTEGER DEFAULT 0,
+    train_accuracy   REAL NOT NULL,
+    trained_at       TEXT NOT NULL,
+    feature_names    TEXT
+  )
+`);
+
 // ── Per-outcome model storage ──────────────────────────────────────────────
 // Each row = one trained model for one of the 15 score buckets.
 // Weights stored as JSON: { sum: number[], diff: number[], featureNames: string[],

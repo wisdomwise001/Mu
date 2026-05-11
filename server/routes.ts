@@ -28,6 +28,13 @@ import { scrapeGeonodeProxies } from "./proxyScraper";
 import { torFetch, getTorStatus, rotateTorCircuit } from "./torFetch";
 import { ensureTor } from "./torManager";
 import { runHierarchicalPrediction } from "./hierarchicalPredictor";
+import {
+  trainBehavioralModels,
+  loadBehavioralModels,
+  predictBehavioral,
+  behavioralTrainingProgress,
+  BEHAVIORAL_FEATURES,
+} from "./behavioralTrainer";
 
 let _openai: OpenAI | null = null;
 function getOpenAI(): OpenAI {
@@ -5342,6 +5349,67 @@ Format with clear markdown headings (### for sections). Keep it punchy but thoro
 
   app.get("/api/engine/all-outcomes-progress", (_req: Request, res: Response) => {
     res.json(allOutcomesTrainState);
+  });
+
+  // ── Behavioral Training (8-stage hierarchical pipeline) ───────────────────
+  app.post("/api/engine/train-behavioral", async (_req: Request, res: Response) => {
+    if (behavioralTrainingProgress.running) {
+      return res.status(409).json({ error: "Behavioral training already in progress" });
+    }
+    // Fire-and-forget — training runs in background
+    trainBehavioralModels().catch((err) => {
+      console.error("[behavioral-trainer] uncaught:", err);
+    });
+    res.json({ started: true });
+  });
+
+  app.get("/api/engine/behavioral-progress", (_req: Request, res: Response) => {
+    res.json(behavioralTrainingProgress);
+  });
+
+  app.get("/api/engine/behavioral-status", (_req: Request, res: Response) => {
+    try {
+      const models = loadBehavioralModels();
+      const modelList = [
+        { type: "winner",     label: "Winner (H/D/A)" },
+        { type: "goal_range", label: "Goal Range" },
+        { type: "btts",       label: "BTTS" },
+        { type: "tempo",      label: "Match Tempo" },
+        { type: "family",     label: "Bucket Family" },
+      ];
+      const statuses = modelList.map(({ type, label }) => {
+        const m = (models as any)[type === "goal_range" ? "goalRange" : type] as any;
+        return {
+          type, label,
+          trained: !!m,
+          sampleCount: m?.sampleCount ?? 0,
+          trueMatchCount: m?.trueMatchCount ?? 0,
+          trainAccuracy: m ? Math.round(m.trainAccuracy * 1000) / 10 : null,
+          trainedAt: m?.trainedAt ?? null,
+        };
+      });
+      // Add exact-score models
+      for (const famId of Object.keys(models.exactByFamily)) {
+        const m = models.exactByFamily[famId];
+        statuses.push({
+          type: `exact_${famId}`, label: `Exact: ${famId.replace(/_/g, " ")}`,
+          trained: true,
+          sampleCount: m.sampleCount,
+          trueMatchCount: m.trueMatchCount,
+          trainAccuracy: Math.round(m.trainAccuracy * 1000) / 10,
+          trainedAt: m.trainedAt,
+        });
+      }
+      const anyTrained = statuses.some((s) => s.trained);
+      res.json({
+        anyTrained,
+        trainedAt: models.trainedAt,
+        models: statuses,
+        featureCount: BEHAVIORAL_FEATURES.length,
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
   });
 
   app.get("/api/engine/outcome-model/:bucket", (req: Request, res: Response) => {

@@ -111,6 +111,7 @@ export default function EngineScreen() {
   const [outcomePolling, setOutcomePolling] = useState(false);
   const [allOutcomesPolling, setAllOutcomesPolling] = useState(false);
   const [hshPolling, setHshPolling] = useState(false);
+  const [behavioralPolling, setBehavioralPolling] = useState(false);
   const webTop = Platform.OS === "web" ? 67 : 0;
   const webBottom = Platform.OS === "web" ? 84 : 0;
 
@@ -306,6 +307,39 @@ export default function EngineScreen() {
   });
 
   const isHSHTraining = hshPolling && hshProgress?.running;
+
+  // ── Behavioral Training ────────────────────────────────────────────────────
+  const { data: behavioralStatus, refetch: refetchBehavioralStatus } = useQuery<any>({
+    queryKey: ["/api/engine/behavioral-status"],
+  });
+
+  const { data: behavioralProgress } = useQuery<any>({
+    queryKey: ["/api/engine/behavioral-progress"],
+    refetchInterval: behavioralPolling ? 1500 : false,
+    enabled: behavioralPolling,
+  });
+
+  useEffect(() => {
+    if (behavioralProgress !== undefined && behavioralProgress.running === false && behavioralPolling) {
+      setBehavioralPolling(false);
+      refetchBehavioralStatus();
+      queryClient.invalidateQueries({ queryKey: ["/api/engine/behavioral-status"] });
+    }
+  }, [behavioralProgress, behavioralPolling]);
+
+  const trainBehavioralMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/engine/train-behavioral");
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.removeQueries({ queryKey: ["/api/engine/behavioral-progress"] });
+      setBehavioralPolling(true);
+    },
+    onError: (err: Error) => Alert.alert("Behavioral Training Error", err.message, [{ text: "OK" }]),
+  });
+
+  const isBehavioralTraining = behavioralPolling && behavioralProgress?.running;
 
   const isTraining = polling && progress?.running;
   const trainingProgress = progress?.progress ?? 0;
@@ -670,6 +704,137 @@ export default function EngineScreen() {
         )}
       </View>
 
+      {/* ── Behavioral Training System ─────────────────────────────────── */}
+      <View style={styles.behavioralSection}>
+        <View style={styles.behavioralHeader}>
+          <View style={styles.behavioralHeaderLeft}>
+            <Ionicons name="git-network" size={20} color="#a78bfa" />
+            <Text style={styles.behavioralTitle}>Behavioral Training System</Text>
+          </View>
+          <View style={[styles.statusBadge, { backgroundColor: behavioralStatus?.anyTrained ? "#581c8722" : "#71717a22" }]}>
+            <View style={[styles.statusDot, { backgroundColor: behavioralStatus?.anyTrained ? "#a78bfa" : "#71717a" }]} />
+            <Text style={[styles.statusText, { color: behavioralStatus?.anyTrained ? "#a78bfa" : "#9ca3af" }]}>
+              {behavioralStatus?.anyTrained ? "Trained" : "Untrained"}
+            </Text>
+          </View>
+        </View>
+
+        <Text style={styles.behavioralSubtitle}>
+          Teaches models WHY a score happens — not just WHAT score happens. Uses behavioral, contextual, and
+          statistical identity to distinguish natural matches from random chaos.
+        </Text>
+
+        {/* 8-Stage Pipeline */}
+        <View style={styles.pipelineBox}>
+          <Text style={styles.pipelineBoxTitle}>8-Stage Training Pipeline</Text>
+          {[
+            { n: "1", label: "Data Completeness Scoring", desc: "90%+=full weight · 75-89%=medium · 50-74%=low · <50%=excluded" },
+            { n: "2", label: "Feature Engineering", desc: "Fair odds · Expected goals · BTTS expectation · Tempo · Behavioral indices" },
+            { n: "3", label: "Bucket Family Training", desc: "6 families: Low Defensive · Balanced BTTS · Open High · Dominant · Chaotic" },
+            { n: "4", label: "True vs False Bucket Separation", desc: "Aligned pre-match data=1.0× · Adjacent family=0.45× · Chaos/random=0.2×" },
+            { n: "5", label: "Contextual Bucket Training", desc: "Each bucket learns its own behavioral identity — protect-lead, collapse risk, aggression" },
+            { n: "6", label: "Hierarchical Models (7 layers)", desc: "Winner → Goal Range → BTTS → Tempo → Family → Exact Score → Contradiction" },
+            { n: "7", label: "Contradiction Detection", desc: "Penalises impossible combos: 0-0 when BTTS=75%, low-goal when high expected" },
+            { n: "8", label: "Confidence Calibration", desc: "completeness × family alignment × winner confidence × odds agreement" },
+          ].map((stage) => (
+            <View key={stage.n} style={styles.stageRow}>
+              <View style={styles.stageBadge}>
+                <Text style={styles.stageBadgeNum}>{stage.n}</Text>
+              </View>
+              <View style={styles.stageContent}>
+                <Text style={styles.stageLabel}>{stage.label}</Text>
+                <Text style={styles.stageDesc}>{stage.desc}</Text>
+              </View>
+            </View>
+          ))}
+        </View>
+
+        {/* Model statuses */}
+        {behavioralStatus?.models && behavioralStatus.models.length > 0 && (
+          <View style={styles.behavioralModels}>
+            <Text style={styles.behavioralModelsTitle}>Model Status</Text>
+            {(behavioralStatus.models as any[]).map((m: any) => (
+              <View key={m.type} style={styles.bModelRow}>
+                <View style={styles.bModelLeft}>
+                  <Ionicons
+                    name={m.trained ? "checkmark-circle" : "ellipse-outline"}
+                    size={14}
+                    color={m.trained ? "#a78bfa" : "#71717a"}
+                  />
+                  <Text style={[styles.bModelLabel, !m.trained && { color: "#71717a" }]}>{m.label}</Text>
+                </View>
+                {m.trained && (
+                  <View style={styles.bModelRight}>
+                    <Text style={styles.bModelAcc}>{m.trainAccuracy}%</Text>
+                    <Text style={styles.bModelSamples}>n={m.sampleCount} ({m.trueMatchCount} true)</Text>
+                  </View>
+                )}
+              </View>
+            ))}
+            {behavioralStatus.trainedAt && (
+              <Text style={styles.behavioralTrainedAt}>
+                Last trained: {formatDate(behavioralStatus.trainedAt)} · {behavioralStatus.featureCount ?? 52} features
+              </Text>
+            )}
+          </View>
+        )}
+
+        {/* Training progress */}
+        {isBehavioralTraining && (
+          <View style={styles.trainingCard}>
+            <View style={styles.trainingHeader}>
+              <ActivityIndicator size="small" color="#a78bfa" />
+              <Text style={styles.trainingTitle}>
+                {behavioralProgress?.stage ?? "Training"} in progress…
+              </Text>
+            </View>
+            <View style={styles.progressBarTrack}>
+              <View style={[styles.progressBarFill, { width: `${behavioralProgress?.progress ?? 0}%`, backgroundColor: "#a78bfa" }]} />
+            </View>
+            <Text style={styles.trainingMessage}>{behavioralProgress?.message ?? ""}</Text>
+            <Text style={[styles.trainingPct, { color: "#a78bfa" }]}>{Math.round(behavioralProgress?.progress ?? 0)}%</Text>
+          </View>
+        )}
+
+        {behavioralProgress?.stageResults && behavioralProgress.stageResults.length > 0 && !isBehavioralTraining && (
+          <View style={styles.allResultsBox}>
+            {(behavioralProgress.stageResults as string[]).map((r, i) => (
+              <Text key={i} style={[styles.allResultLine, { color: "#c4b5fd" }]}>{r}</Text>
+            ))}
+          </View>
+        )}
+
+        {behavioralProgress?.error && !isBehavioralTraining && (
+          <View style={styles.errorCard}>
+            <Ionicons name="warning-outline" size={16} color="#f87171" />
+            <Text style={styles.errorText}>{behavioralProgress.error}</Text>
+          </View>
+        )}
+
+        <TouchableOpacity
+          style={[styles.behavioralTrainBtn, (isBehavioralTraining || trainBehavioralMutation.isPending) && styles.trainButtonDisabled]}
+          onPress={() => trainBehavioralMutation.mutate()}
+          disabled={isBehavioralTraining || trainBehavioralMutation.isPending}
+        >
+          {isBehavioralTraining || trainBehavioralMutation.isPending ? (
+            <ActivityIndicator size="small" color="#fff" />
+          ) : (
+            <Ionicons name="git-network" size={18} color="#fff" />
+          )}
+          <Text style={styles.behavioralTrainBtnText}>
+            {isBehavioralTraining
+              ? "Training behavioral models…"
+              : behavioralStatus?.anyTrained
+                ? "Retrain Behavioral Models"
+                : "Train Behavioral Models"}
+          </Text>
+        </TouchableOpacity>
+        <Text style={styles.behavioralHint}>
+          Requires ≥20 stored matches (bulk-upload from Processing tab). Trains all 7 hierarchical
+          models using {behavioralStatus?.featureCount ?? 52} behavioral + contextual + statistical features.
+        </Text>
+      </View>
+
       <View style={styles.architectureSection}>
         <Text style={styles.sectionTitle}>Engine Architecture</Text>
         <Text style={styles.sectionSubtitle}>
@@ -884,6 +1049,48 @@ const styles = StyleSheet.create({
     fontSize: 11, fontFamily: Platform.select({ ios: "Menlo", android: "monospace", default: "monospace" }),
     color: "#cbd5e1", lineHeight: 18,
   },
+
+  // Behavioral Training section
+  behavioralSection: {
+    marginBottom: 24, borderRadius: 14, padding: 16,
+    backgroundColor: "#1a1033", borderWidth: 1, borderColor: "#4c1d9544",
+  },
+  behavioralHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 8 },
+  behavioralHeaderLeft: { flexDirection: "row", alignItems: "center", gap: 8, flex: 1 },
+  behavioralTitle: { fontSize: 16, fontFamily: "Inter_700Bold", color: "#c4b5fd" },
+  behavioralSubtitle: { fontSize: 12, fontFamily: "Inter_400Regular", color: "#94a3b8", marginBottom: 14, lineHeight: 18 },
+  pipelineBox: {
+    backgroundColor: "#120b26", borderRadius: 10, padding: 12, marginBottom: 14,
+    borderWidth: 1, borderColor: "#4c1d9533",
+  },
+  pipelineBoxTitle: { fontSize: 12, fontFamily: "Inter_600SemiBold", color: "#a78bfa", marginBottom: 10 },
+  stageRow: { flexDirection: "row", alignItems: "flex-start", gap: 10, marginBottom: 8 },
+  stageBadge: {
+    width: 22, height: 22, borderRadius: 11, backgroundColor: "#4c1d95",
+    alignItems: "center", justifyContent: "center", flexShrink: 0, marginTop: 1,
+  },
+  stageBadgeNum: { fontSize: 10, fontFamily: "Inter_700Bold", color: "#c4b5fd" },
+  stageContent: { flex: 1 },
+  stageLabel: { fontSize: 12, fontFamily: "Inter_600SemiBold", color: "#ddd6fe", marginBottom: 1 },
+  stageDesc: { fontSize: 10, fontFamily: "Inter_400Regular", color: "#6b7280", lineHeight: 15 },
+  behavioralModels: {
+    backgroundColor: "#120b26", borderRadius: 10, padding: 12, marginBottom: 14,
+    borderWidth: 1, borderColor: "#4c1d9533",
+  },
+  behavioralModelsTitle: { fontSize: 12, fontFamily: "Inter_600SemiBold", color: "#a78bfa", marginBottom: 10 },
+  bModelRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: 5, borderBottomWidth: 1, borderBottomColor: "#1e1040" },
+  bModelLeft: { flexDirection: "row", alignItems: "center", gap: 8, flex: 1 },
+  bModelLabel: { fontSize: 12, fontFamily: "Inter_500Medium", color: "#ddd6fe" },
+  bModelRight: { flexDirection: "row", alignItems: "center", gap: 10 },
+  bModelAcc: { fontSize: 12, fontFamily: "Inter_700Bold", color: "#a78bfa" },
+  bModelSamples: { fontSize: 10, fontFamily: "Inter_400Regular", color: "#6b7280" },
+  behavioralTrainedAt: { fontSize: 10, fontFamily: "Inter_400Regular", color: "#6b7280", marginTop: 8, textAlign: "center" },
+  behavioralTrainBtn: {
+    backgroundColor: "#7c3aed", borderRadius: 12, paddingVertical: 14, paddingHorizontal: 20,
+    flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 10, marginBottom: 8,
+  },
+  behavioralTrainBtnText: { fontSize: 15, fontFamily: "Inter_600SemiBold", color: "#fff" },
+  behavioralHint: { fontSize: 11, fontFamily: "Inter_400Regular", color: "#6b7280", textAlign: "center" },
 
   // HSH section
   hshSection: { marginBottom: 24 },
