@@ -6406,9 +6406,54 @@ Format with clear markdown headings (### for sections). Keep it punchy but thoro
               `).run(bucketId, scoreSum, scoreAbsDiff, eventId);
             } catch {}
 
+            // ── Odds fetch (1X2 market) ──────────────────────────────────────
+            // Fetch pre-match odds and pass them to computeHalfContext so
+            // ctx_odds_* columns are populated for training. This is fire-and-
+            // forget just like the context call below.
+            let matchOdds: { homeWin?: number; draw?: number; awayWin?: number } | null = null;
+            try {
+              const oddsData = await fetchSofaScoreOptional(`/event/${eventId}/odds/1/all`);
+              if (oddsData?.markets?.length) {
+                // Use the first market (usually the primary 1X2 bookmaker)
+                const mkt = oddsData.markets[0];
+                const parseFrac = (f: string): number | null => {
+                  if (!f || f === "-" || f === "N/A") return null;
+                  const fl = f.trim().toLowerCase();
+                  if (fl === "evs" || fl === "ev") return 2.0;
+                  if (fl.includes("/")) {
+                    const [n, d] = fl.split("/").map(Number);
+                    return (!isNaN(n) && !isNaN(d) && d !== 0) ? +(n / d + 1).toFixed(3) : null;
+                  }
+                  const n = parseFloat(fl);
+                  return isNaN(n) ? null : +(n + 1).toFixed(3);
+                };
+                const homeChoice = mkt.choices?.find((c: any) => c.name === "1");
+                const drawChoice = mkt.choices?.find((c: any) => c.name === "X");
+                const awayChoice = mkt.choices?.find((c: any) => c.name === "2");
+                const hw = parseFrac(homeChoice?.fractionalValue);
+                const dr = parseFrac(drawChoice?.fractionalValue);
+                const aw = parseFrac(awayChoice?.fractionalValue);
+                if (hw || dr || aw) {
+                  matchOdds = {
+                    homeWin: hw ?? undefined,
+                    draw:    dr ?? undefined,
+                    awayWin: aw ?? undefined,
+                  };
+                  // Store odds immediately so they're available even if ctx fails
+                  try {
+                    db.prepare(`
+                      UPDATE match_simulations
+                      SET ctx_odds_home_win = ?, ctx_odds_draw = ?, ctx_odds_away_win = ?
+                      WHERE event_id = ?
+                    `).run(hw, dr, aw, eventId);
+                  } catch {}
+                }
+              }
+            } catch { /* odds are optional */ }
+
             // Fire-and-forget: computeHalfContext runs in the background and
             // does NOT block the next concurrent match from starting.
-            computeHalfContext(eventId).then((ctx) => {
+            computeHalfContext(eventId, { odds: matchOdds ?? undefined }).then((ctx) => {
               const c = ctx.context;
               const sigFirst = ctx.signals.filter((s: any) => s.leans === "first").reduce((acc: number, s: any) => acc + s.weight, 0);
               const sigSecond = ctx.signals.filter((s: any) => s.leans === "second").reduce((acc: number, s: any) => acc + s.weight, 0);
@@ -6641,16 +6686,17 @@ Format with clear markdown headings (### for sections). Keep it punchy but thoro
           };
           dataSource = "live";
         }
-      } catch { /* fall through to DB */ }
+      } catch (simErr: any) {
+        // Live fetch failed — surface the real reason, never ask to bulk-upload
+        return res.status(503).json({
+          error: `Could not fetch live match statistics. This usually means the team's recent match history is unavailable on SofaScore for this competition (${(simErr as Error).message || "fetch failed"}). Try again in a moment or check that the match exists on SofaScore.`,
+        });
+      }
 
-      // Fallback: try stored DB row
       if (!row) {
-        const dbRow: any = db.prepare("SELECT * FROM match_simulations WHERE event_id = ?").get(eventId);
-        if (!dbRow) {
-          return res.status(404).json({ error: "Could not fetch live match data and no stored row found. Try bulk-uploading this match from the Processing tab first." });
-        }
-        row = dbRow as Record<string, any>;
-        dataSource = "database";
+        return res.status(503).json({
+          error: "Live match statistics returned no usable data. The team may have insufficient recent match history on SofaScore for this competition.",
+        });
       }
 
       // Fetch xG result probabilities for market weighting
