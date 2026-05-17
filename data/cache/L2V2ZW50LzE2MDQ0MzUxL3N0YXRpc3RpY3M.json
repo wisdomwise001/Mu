@@ -1,0 +1,1 @@
+{"endpoint":"/event/16044351/statistics","data":{"statistics":[{"period":"ALL","groups":[{"groupName":"Match overview","statisticsItems":[{"name":"Expected goals","home":"0.75","away":"1.94","compareCode":2,"statisticsType":"positive","valueType":"event","homeValue":0.75,"awayValue":1.94,"renderType":1,"key":"expectedGoals"}]}]}]},"expiresAt":1779111680268}

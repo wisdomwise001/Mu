@@ -632,6 +632,38 @@ export async function trainBehavioralModels(): Promise<void> {
       `Tempo: ${Xt.length} samples → ${(tempoModel.trainAccuracy * 100).toFixed(1)}% train acc`
     );
 
+    // ── STAGE 6 Model 4b: Draw Classifier (dedicated draw vs non-draw) ────
+    // A dedicated binary classifier for draws is far more sensitive than the
+    // 3-class Winner model because it can focus entirely on draw-specific
+    // behavioral patterns: balanced form, defensive coaches, low expected goals,
+    // even aggression, minimal motivation asymmetry.
+    behavioralTrainingProgress.stage = "Draw Classifier";
+    behavioralTrainingProgress.progress = 47;
+    behavioralTrainingProgress.message = "Training Draw Classifier (Draw vs Non-Draw — dedicated model)...";
+    await new Promise<void>((r) => setImmediate(r));
+
+    const drawClasses = ["non_draw", "draw"];
+    const { X: Xd, y: yd, sw: swd, trueMatchCount: tD } = prepareSamples(
+      drawClasses,
+      (row) => (num(row.home_goals) === num(row.away_goals)) ? "draw" : "non_draw"
+    );
+
+    const { weights: wD2, biases: bD2 } = await trainSoftmax(Xd, yd, swd, 2, {
+      epochs: 700, lr: 0.018, l2: 1.5e-4,
+    }, (pct) => {
+      behavioralTrainingProgress.progress = 47 + Math.round(pct * 6);
+    });
+    const drawModel: SoftmaxModel = {
+      modelType: "draw_classifier", classes: drawClasses, weights: wD2, biases: bD2,
+      normMean: mean, normStd: std, featureNames: BEHAVIORAL_FEATURES,
+      sampleCount: Xd.length, trueMatchCount: tD,
+      trainAccuracy: 0, trainedAt: new Date().toISOString(),
+    };
+    drawModel.trainAccuracy = trainAccuracy(Xd, yd, drawModel);
+    behavioralTrainingProgress.stageResults.push(
+      `Draw Classifier: ${Xd.length} samples (${yd.filter(y=>y===1).length} draws) → ${(drawModel.trainAccuracy * 100).toFixed(1)}% train acc`
+    );
+
     // ── STAGE 3+5: Bucket Family Model ────────────────────────────────────
     behavioralTrainingProgress.stage = "Family Model";
     behavioralTrainingProgress.progress = 60;
@@ -727,7 +759,7 @@ export async function trainBehavioralModels(): Promise<void> {
       );
     };
 
-    [winnerModel, goalRangeModel, bttsModel, tempoModel, familyModel, ...exactModels].forEach(saveModel);
+    [winnerModel, goalRangeModel, bttsModel, tempoModel, drawModel, familyModel, ...exactModels].forEach(saveModel);
 
     behavioralTrainingProgress.progress = 100;
     behavioralTrainingProgress.message = "All behavioral models trained and saved.";
@@ -748,6 +780,7 @@ export interface LoadedBehavioralModels {
   goalRange?: SoftmaxModel;
   btts?: SoftmaxModel;
   tempo?: SoftmaxModel;
+  drawClassifier?: SoftmaxModel;
   family?: SoftmaxModel;
   exactByFamily: Record<string, SoftmaxModel>;
   trainedAt: string | null;
@@ -775,11 +808,12 @@ export function loadBehavioralModels(): LoadedBehavioralModels {
       };
       if (r.trained_at > (result.trainedAt ?? "")) result.trainedAt = r.trained_at;
 
-      if      (r.model_type === "winner")     result.winner     = m;
-      else if (r.model_type === "goal_range") result.goalRange  = m;
-      else if (r.model_type === "btts")       result.btts       = m;
-      else if (r.model_type === "tempo")      result.tempo      = m;
-      else if (r.model_type === "family")     result.family     = m;
+      if      (r.model_type === "winner")          result.winner          = m;
+      else if (r.model_type === "goal_range")      result.goalRange       = m;
+      else if (r.model_type === "btts")            result.btts            = m;
+      else if (r.model_type === "tempo")           result.tempo           = m;
+      else if (r.model_type === "draw_classifier") result.drawClassifier  = m;
+      else if (r.model_type === "family")          result.family          = m;
       else if (r.model_type.startsWith("exact_")) {
         const famId = r.model_type.replace("exact_", "");
         result.exactByFamily[famId] = m;
@@ -795,6 +829,7 @@ export interface BehavioralPrediction {
   goalRange:{ label: string; probs: Record<string, number>; confidence: number };
   btts:     { label: string; probs: Record<string, number>; confidence: number };
   tempo:    { label: string; probs: Record<string, number>; confidence: number };
+  drawClassifier: { drawProbability: number; nonDrawProbability: number; confidence: number; available: boolean };
   family:   { label: string; id: string; probs: Record<string, number>; confidence: number };
   exactScores: Array<{
     scoreline: string;
@@ -831,6 +866,18 @@ export function predictBehavioral(row: any, models: LoadedBehavioralModels): Beh
   const btts      = models.btts      ? classify(models.btts)      : { label: "?", probs: {}, confidence: 0 };
   const tempo     = models.tempo     ? classify(models.tempo)     : { label: "?", probs: {}, confidence: 0 };
   const familyResult = models.family ? classify(models.family)    : { label: "?", probs: {}, confidence: 0 };
+
+  // Draw Classifier — dedicated draw vs non-draw binary model
+  let drawClassifier: BehavioralPrediction["drawClassifier"] = { drawProbability: 0, nonDrawProbability: 0, confidence: 0, available: false };
+  if (models.drawClassifier) {
+    const dr = classify(models.drawClassifier);
+    drawClassifier = {
+      drawProbability: dr.probs["draw"] ?? 0,
+      nonDrawProbability: dr.probs["non_draw"] ?? 0,
+      confidence: dr.confidence,
+      available: true,
+    };
+  }
 
   const familyId = familyResult.label as BucketFamilyId;
   const famDef   = BUCKET_FAMILIES.find((f) => f.id === familyId);
@@ -959,7 +1006,7 @@ export function predictBehavioral(row: any, models: LoadedBehavioralModels): Beh
   ) * 100;
 
   return {
-    winner, goalRange, btts, tempo, family,
+    winner, goalRange, btts, tempo, drawClassifier, family,
     exactScores: exactRaw,
     contradictions,
     calibratedConfidence: Math.min(99, calibrated),

@@ -130,6 +130,75 @@ interface HierarchicalResult {
   dataSource: string;
   overallConfidence: number;
   processingMs: number;
+  // New intelligence layers
+  behavioral?: BehavioralOutput | null;
+  scoreValidations?: ScoreValidationItem[];
+  butterflyEffect?: ButterflyEffectData | null;
+  extendedMarkets?: ExtendedMarketsData | null;
+}
+
+// ── New types for intelligence layers ─────────────────────────────────────────
+interface ScoreValidationItem {
+  scoreline: string;
+  homeGoals: number;
+  awayGoals: number;
+  homeExpected: number;
+  awayExpected: number;
+  homePoisson: number;
+  awayPoisson: number;
+  combinedPoisson: number;
+  achievabilityScore: number;
+  validated: boolean;
+  flipPotential: number;
+  flipSide: string;
+  flipSignals: string[];
+  riskFactors: string[];
+  label: string;
+}
+
+interface ButterflyEffectData {
+  upsetPotential: number;
+  upsetLabel: string;
+  upsetSignals: string[];
+  goalInflationRisk: number;
+  goalInflationLabel: string;
+  goalInflationSignals: string[];
+  bttsFlipRisk: number;
+  bttsFlipLabel: string;
+  bttsFlipSignals: string[];
+  overallChaosIndex: number;
+  chaosLabel: string;
+  chaosColor: string;
+}
+
+interface ExtendedMarketsData {
+  homeWin:    { probability: number; prediction: string; label: string };
+  draw:       { probability: number; prediction: string; label: string };
+  awayWin:    { probability: number; prediction: string; label: string };
+  x1:         { probability: number; prediction: string; label: string };
+  x2:         { probability: number; prediction: string; label: string };
+  homeOrAway: { probability: number; prediction: string; label: string };
+  over25:     { probability: number; prediction: string; label: string };
+  over35:     { probability: number; prediction: string; label: string };
+  btts:       { probability: number; prediction: string; label: string };
+  firstToScore: { homeProbability: number; awayProbability: number; noGoalProbability: number; prediction: string };
+  home2Plus:  { probability: number; prediction: string; label: string };
+  away2Plus:  { probability: number; prediction: string; label: string };
+  drawProbability: number;
+  drawIntelligence: { isLikelyDraw: boolean; drawScore: number; signals: string[] };
+}
+
+interface BehavioralOutput {
+  winner:   { label: string; probs: Record<string, number>; confidence: number };
+  goalRange:{ label: string; probs: Record<string, number>; confidence: number };
+  btts:     { label: string; probs: Record<string, number>; confidence: number };
+  tempo:    { label: string; probs: Record<string, number>; confidence: number };
+  drawClassifier: { drawProbability: number; nonDrawProbability: number; confidence: number; available: boolean };
+  family:   { label: string; id: string; probs: Record<string, number>; confidence: number };
+  exactScores: Array<{ scoreline: string; homeGoals: number; awayGoals: number; finalConfidence: number; outcome: string }>;
+  contradictions: string[];
+  calibratedConfidence: number;
+  completenessScore: number;
 }
 
 // ── Tiny animated progress bar ────────────────────────────────────────────────
@@ -637,6 +706,452 @@ function MarketsCard({ markets, homeTeamName, awayTeamName }: {
   );
 }
 
+// ── Bet List Card (Full Extended Markets) ────────────────────────────────────
+function BetListCard({ em, homeTeamName, awayTeamName }: {
+  em: ExtendedMarketsData;
+  homeTeamName: string;
+  awayTeamName: string;
+}) {
+  const predColor = (p: string) =>
+    p === "Yes" || p === "Home" || p === "Away" ? "#4ade80" : p === "No" ? "#f87171" : "#f59e0b";
+  const pctColor  = (p: number) => p >= 60 ? "#4ade80" : p >= 40 ? "#f59e0b" : "#f87171";
+
+  return (
+    <View style={s.card}>
+      <StageHeader stage="Bet List" title="Full Prediction Markets" badge="Validated" badgeColor="#4ade80" />
+
+      {/* ── 1X2 bar ── */}
+      <Text style={s.betGroupLabel}>1X2</Text>
+      <View style={s.winProbTrack}>
+        <View style={[s.winProbFill, { flex: em.homeWin.probability, backgroundColor: "#3D7BF4" }]} />
+        <View style={[s.winProbFill, { flex: em.draw.probability,    backgroundColor: "#5C5D66" }]} />
+        <View style={[s.winProbFill, { flex: em.awayWin.probability, backgroundColor: "#f59e0b" }]} />
+      </View>
+      <View style={s.betRow3}>
+        {[
+          { label: "1 — " + homeTeamName, pred: em.homeWin.prediction, prob: em.homeWin.probability, color: "#3D7BF4" },
+          { label: "X — Draw",            pred: em.draw.prediction,    prob: em.draw.probability,    color: "#8C8D96" },
+          { label: "2 — " + awayTeamName, pred: em.awayWin.prediction, prob: em.awayWin.probability, color: "#f59e0b" },
+        ].map((m) => (
+          <View key={m.label} style={s.betCell3}>
+            <Text style={[s.betCellLabel, { color: m.color }]} numberOfLines={1}>{m.label}</Text>
+            <Text style={[s.betCellPred, { color: predColor(m.pred) }]}>{m.pred}</Text>
+            <Text style={[s.betCellProb, { color: pctColor(m.prob) }]}>{m.prob}%</Text>
+          </View>
+        ))}
+      </View>
+
+      {/* ── Double Chance ── */}
+      <Text style={s.betGroupLabel}>Double Chance</Text>
+      <View style={s.betRow3}>
+        {[
+          { label: "X1 — Home/Draw", pred: em.x1.prediction,        prob: em.x1.probability },
+          { label: "X2 — Away/Draw", pred: em.x2.prediction,        prob: em.x2.probability },
+          { label: "12 — No Draw",   pred: em.homeOrAway.prediction, prob: em.homeOrAway.probability },
+        ].map((m) => (
+          <View key={m.label} style={s.betCell3}>
+            <Text style={s.betCellLabel} numberOfLines={1}>{m.label}</Text>
+            <Text style={[s.betCellPred, { color: predColor(m.pred) }]}>{m.pred}</Text>
+            <Text style={[s.betCellProb, { color: pctColor(m.prob) }]}>{m.prob}%</Text>
+          </View>
+        ))}
+      </View>
+
+      {/* ── Goals + BTTS ── */}
+      <Text style={s.betGroupLabel}>Goals Markets</Text>
+      <View style={s.betRow3}>
+        {[
+          { label: "BTTS",     pred: em.btts.prediction,   prob: em.btts.probability },
+          { label: "Over 2.5", pred: em.over25.prediction, prob: em.over25.probability },
+          { label: "Over 3.5", pred: em.over35.prediction, prob: em.over35.probability },
+        ].map((m) => (
+          <View key={m.label} style={s.betCell3}>
+            <Text style={s.betCellLabel}>{m.label}</Text>
+            <Text style={[s.betCellPred, { color: predColor(m.pred) }]}>{m.pred}</Text>
+            <Text style={[s.betCellProb, { color: pctColor(m.prob) }]}>{m.prob}%</Text>
+          </View>
+        ))}
+      </View>
+
+      {/* ── First to Score ── */}
+      <Text style={s.betGroupLabel}>First Team to Score</Text>
+      <View style={s.firstScoreRow}>
+        <View style={s.firstScoreItem}>
+          <Text style={s.firstScoreTeam} numberOfLines={1}>{homeTeamName}</Text>
+          <Text style={[s.firstScoreProb, { color: pctColor(em.firstToScore.homeProbability) }]}>
+            {em.firstToScore.homeProbability}%
+          </Text>
+          {em.firstToScore.prediction === "Home" && (
+            <View style={s.firstScorePredBadge}><Text style={s.firstScorePredText}>Pick</Text></View>
+          )}
+        </View>
+        <View style={s.firstScoreDivider} />
+        <View style={s.firstScoreItem}>
+          <Text style={s.firstScoreTeam}>No Goal</Text>
+          <Text style={[s.firstScoreProb, { color: "#8C8D96" }]}>{em.firstToScore.noGoalProbability}%</Text>
+        </View>
+        <View style={s.firstScoreDivider} />
+        <View style={s.firstScoreItem}>
+          <Text style={s.firstScoreTeam} numberOfLines={1}>{awayTeamName}</Text>
+          <Text style={[s.firstScoreProb, { color: pctColor(em.firstToScore.awayProbability) }]}>
+            {em.firstToScore.awayProbability}%
+          </Text>
+          {em.firstToScore.prediction === "Away" && (
+            <View style={s.firstScorePredBadge}><Text style={s.firstScorePredText}>Pick</Text></View>
+          )}
+        </View>
+      </View>
+
+      {/* ── Each team to score 2+ ── */}
+      <Text style={s.betGroupLabel}>Each Team to Score 2+</Text>
+      <View style={s.betRow2}>
+        {[
+          { label: homeTeamName + " 2+", pred: em.home2Plus.prediction, prob: em.home2Plus.probability },
+          { label: awayTeamName + " 2+", pred: em.away2Plus.prediction, prob: em.away2Plus.probability },
+        ].map((m) => (
+          <View key={m.label} style={s.betCell2}>
+            <Text style={s.betCellLabel} numberOfLines={1}>{m.label}</Text>
+            <Text style={[s.betCellPred, { color: predColor(m.pred) }]}>{m.pred}</Text>
+            <Text style={[s.betCellProb, { color: pctColor(m.prob) }]}>{m.prob}%</Text>
+          </View>
+        ))}
+      </View>
+
+      {/* ── Draw Intelligence ── */}
+      {em.drawIntelligence && (
+        <View style={[s.drawIntelBox, { borderColor: em.drawIntelligence.isLikelyDraw ? "#8C8D96" : "#4ade8033" }]}>
+          <View style={s.drawIntelHeader}>
+            <Ionicons name="remove-circle-outline" size={14} color="#8C8D96" />
+            <Text style={s.drawIntelTitle}>Draw Intelligence</Text>
+            <View style={[s.drawIntelBadge, { backgroundColor: em.drawIntelligence.isLikelyDraw ? "#8C8D9622" : "#4ade8022" }]}>
+              <Text style={[s.drawIntelBadgeText, { color: em.drawIntelligence.isLikelyDraw ? "#8C8D96" : "#4ade80" }]}>
+                {em.drawIntelligence.isLikelyDraw ? "Draw Likely" : "Result Expected"}
+              </Text>
+            </View>
+          </View>
+          <View style={s.drawIntelMetrics}>
+            <View style={s.drawIntelMetric}>
+              <Text style={[s.drawIntelMetricVal, { color: "#8C8D96" }]}>{em.drawProbability}%</Text>
+              <Text style={s.drawIntelMetricLbl}>Draw prob</Text>
+            </View>
+            <View style={s.drawIntelMetric}>
+              <Text style={[s.drawIntelMetricVal, { color: "#f59e0b" }]}>{(em.drawIntelligence.drawScore * 100).toFixed(0)}%</Text>
+              <Text style={s.drawIntelMetricLbl}>Draw score</Text>
+            </View>
+          </View>
+          {em.drawIntelligence.signals.slice(0, 2).map((sig, i) => (
+            <View key={i} style={s.identitySignal}>
+              <View style={[s.signalDot, { backgroundColor: "#8C8D96" }]} />
+              <Text style={s.identitySignalText}>{sig}</Text>
+            </View>
+          ))}
+        </View>
+      )}
+    </View>
+  );
+}
+
+// ── Behavioral Panel Card ────────────────────────────────────────────────────
+function BehavioralPanel({ beh, homeTeamName, awayTeamName }: {
+  beh: BehavioralOutput;
+  homeTeamName: string;
+  awayTeamName: string;
+}) {
+  const [expanded, setExpanded] = useState(false);
+
+  const WINNER_COLOR: Record<string, string> = { H: "#3D7BF4", D: "#8C8D96", A: "#f59e0b" };
+  const BTTS_COLOR:   Record<string, string> = { yes: "#4ade80", no: "#f87171", fifty_fifty: "#f59e0b" };
+  const TEMPO_COLOR:  Record<string, string> = { open: "#f59e0b", controlled: "#3D7BF4", defensive: "#8C8D96" };
+  const FAMILY_COLOR: Record<string, string> = {
+    low_defensive: "#8C8D96", balanced_btts: "#3D7BF4", open_high: "#f59e0b",
+    dominant_home: "#4ade80", dominant_away: "#f87171", chaotic: "#a78bfa",
+  };
+
+  const winLabel = beh.winner.label === "H" ? homeTeamName
+    : beh.winner.label === "A" ? awayTeamName : "Draw";
+  const winColor = WINNER_COLOR[beh.winner.label] ?? Colors.dark.accent;
+  const bttsColor = BTTS_COLOR[beh.btts.label] ?? Colors.dark.accent;
+
+  return (
+    <View style={[s.card, { borderColor: "#a78bfa33" }]}>
+      <StageHeader stage="Behavioral" title="Behavioral Model Analysis" badge={`${beh.calibratedConfidence}% conf`} badgeColor="#a78bfa" />
+      <Text style={s.behavioralSubtitle}>
+        Learned from match history — behavioral patterns, team psychology & identity
+      </Text>
+
+      {/* Quick summary row */}
+      <View style={s.behavioralSummaryRow}>
+        <View style={[s.behavioralSummaryItem, { borderColor: winColor + "44" }]}>
+          <Text style={[s.behavioralSummaryVal, { color: winColor }]}>{winLabel}</Text>
+          <Text style={s.behavioralSummaryLbl}>Winner</Text>
+          <Text style={[s.behavioralSummaryConf, { color: winColor }]}>{beh.winner.confidence}%</Text>
+        </View>
+        <View style={[s.behavioralSummaryItem, { borderColor: bttsColor + "44" }]}>
+          <Text style={[s.behavioralSummaryVal, { color: bttsColor }]}>BTTS {beh.btts.label.toUpperCase()}</Text>
+          <Text style={s.behavioralSummaryLbl}>Both Score</Text>
+          <Text style={[s.behavioralSummaryConf, { color: bttsColor }]}>{beh.btts.confidence}%</Text>
+        </View>
+        <View style={[s.behavioralSummaryItem, { borderColor: "#a78bfa44" }]}>
+          <Text style={[s.behavioralSummaryVal, { color: "#a78bfa" }]}>{beh.goalRange.label.replace("_", " ")}</Text>
+          <Text style={s.behavioralSummaryLbl}>Goals</Text>
+          <Text style={[s.behavioralSummaryConf, { color: "#a78bfa" }]}>{beh.goalRange.confidence}%</Text>
+        </View>
+      </View>
+
+      {/* Draw Classifier */}
+      {beh.drawClassifier?.available && (
+        <View style={s.drawClassifierRow}>
+          <Ionicons name="remove-circle-outline" size={13} color="#8C8D96" />
+          <Text style={s.drawClassifierLabel}>Draw Detector:</Text>
+          <Text style={[s.drawClassifierVal, {
+            color: beh.drawClassifier.drawProbability >= 55 ? "#f59e0b" : "#4ade80",
+          }]}>
+            {beh.drawClassifier.drawProbability.toFixed(0)}% draw / {beh.drawClassifier.nonDrawProbability.toFixed(0)}% result
+          </Text>
+          <View style={[s.drawClassifierBadge, {
+            backgroundColor: beh.drawClassifier.drawProbability >= 55 ? "#f59e0b22" : "#4ade8022",
+          }]}>
+            <Text style={[s.drawClassifierBadgeText, {
+              color: beh.drawClassifier.drawProbability >= 55 ? "#f59e0b" : "#4ade80",
+            }]}>
+              {beh.drawClassifier.drawProbability >= 55 ? "Draw Alert" : "Result Likely"}
+            </Text>
+          </View>
+        </View>
+      )}
+
+      {/* Tempo */}
+      <View style={s.behavioralTempoRow}>
+        <Text style={s.behavioralTempoLabel}>Tempo:</Text>
+        <Text style={[s.behavioralTempoVal, { color: TEMPO_COLOR[beh.tempo.label] ?? "#8C8D96" }]}>
+          {beh.tempo.label} ({beh.tempo.confidence}%)
+        </Text>
+      </View>
+
+      {/* Family */}
+      <View style={s.behavioralFamilyRow}>
+        <View style={[s.behavioralFamilyDot, { backgroundColor: FAMILY_COLOR[beh.family.id] ?? Colors.dark.accent }]} />
+        <Text style={[s.behavioralFamilyLabel, { color: FAMILY_COLOR[beh.family.id] ?? Colors.dark.accent }]}>
+          {beh.family.label.replace("_", " ")}
+        </Text>
+        <Text style={s.behavioralFamilyConf}>{beh.family.confidence}% family match</Text>
+      </View>
+
+      {/* Expand: exact scores from behavioral model */}
+      {beh.exactScores.length > 0 && (
+        <TouchableOpacity style={s.behavioralExpandBtn} onPress={() => setExpanded(!expanded)} activeOpacity={0.7}>
+          <Text style={s.behavioralExpandText}>
+            {expanded ? "Hide" : "Show"} behavioral exact score predictions
+          </Text>
+          <Ionicons name={expanded ? "chevron-up" : "chevron-down"} size={13} color="#a78bfa" />
+        </TouchableOpacity>
+      )}
+      {expanded && (
+        <View style={s.behavioralExactList}>
+          {beh.exactScores.slice(0, 5).map((sc, i) => (
+            <View key={sc.scoreline + i} style={s.behavioralExactRow}>
+              <Text style={s.behavioralExactRank}>#{i + 1}</Text>
+              <Text style={s.behavioralExactScore}>{sc.scoreline}</Text>
+              <Text style={[s.behavioralExactOutcome, {
+                color: sc.outcome === "Home Win" ? "#3D7BF4" : sc.outcome === "Away Win" ? "#f59e0b" : "#8C8D96",
+              }]}>{sc.outcome}</Text>
+              <Text style={[s.behavioralExactConf, {
+                color: sc.finalConfidence >= 20 ? "#4ade80" : sc.finalConfidence >= 10 ? "#f59e0b" : "#f87171",
+              }]}>{sc.finalConfidence.toFixed(1)}%</Text>
+            </View>
+          ))}
+          {beh.contradictions.length > 0 && (
+            <View style={s.behavioralContraRow}>
+              <Ionicons name="warning-outline" size={12} color="#f59e0b" />
+              <Text style={s.behavioralContraText}>{beh.contradictions[0]}</Text>
+            </View>
+          )}
+        </View>
+      )}
+    </View>
+  );
+}
+
+// ── Score Validation Card ────────────────────────────────────────────────────
+function ScoreValidationCard({ validations }: { validations: ScoreValidationItem[] }) {
+  const labelColor = (l: string) =>
+    l === "Realistic" ? "#4ade80" : l === "Stretched" ? "#f59e0b" : "#f87171";
+  const riskColor = (v: number) => v >= 0.55 ? "#f87171" : v >= 0.32 ? "#f59e0b" : "#4ade80";
+
+  return (
+    <View style={s.card}>
+      <StageHeader stage="Validator" title="Score Validation" badge="Realism Check" badgeColor="#4ade80" />
+      <Text style={s.validatorSubtitle}>
+        Each predicted score checked against Poisson performance models — confirms the team can realistically produce these numbers.
+      </Text>
+
+      {validations.map((v, i) => (
+        <View key={v.scoreline + i} style={[s.validationItem, {
+          borderColor: labelColor(v.label) + "33",
+          borderLeftColor: labelColor(v.label),
+          borderLeftWidth: 3,
+        }]}>
+          <View style={s.validationHeader}>
+            <Text style={s.validationScore}>{v.scoreline}</Text>
+            <View style={[s.validationLabelBadge, { backgroundColor: labelColor(v.label) + "22" }]}>
+              <Text style={[s.validationLabelText, { color: labelColor(v.label) }]}>{v.label}</Text>
+            </View>
+            <Text style={[s.validationAch, { color: labelColor(v.label) }]}>
+              {(v.achievabilityScore * 100).toFixed(0)}% achievable
+            </Text>
+          </View>
+
+          {/* Expected vs predicted */}
+          <View style={s.validationExpRow}>
+            <View style={s.validationExpItem}>
+              <Text style={s.validationExpLbl}>Expected</Text>
+              <Text style={s.validationExpVal}>{v.homeExpected} – {v.awayExpected}</Text>
+            </View>
+            <View style={s.validationExpItem}>
+              <Text style={s.validationExpLbl}>P(scoreline)</Text>
+              <Text style={s.validationExpVal}>{v.combinedPoisson.toFixed(2)}%</Text>
+            </View>
+            {v.flipSide !== "none" && (
+              <View style={s.validationExpItem}>
+                <Text style={s.validationExpLbl}>Flip risk</Text>
+                <Text style={[s.validationExpVal, { color: riskColor(v.flipPotential) }]}>
+                  {(v.flipPotential * 100).toFixed(0)}%
+                </Text>
+              </View>
+            )}
+          </View>
+
+          {/* Risk factors */}
+          {v.riskFactors.length > 0 && (
+            <View style={s.validationRisks}>
+              {v.riskFactors.slice(0, 2).map((r, j) => (
+                <View key={j} style={s.identitySignal}>
+                  <View style={[s.signalDot, { backgroundColor: "#f59e0b" }]} />
+                  <Text style={s.identitySignalText}>{r}</Text>
+                </View>
+              ))}
+            </View>
+          )}
+
+          {/* Flip signals */}
+          {v.flipSignals.length > 0 && v.flipSide !== "none" && (
+            <View style={s.validationFlipBox}>
+              <Text style={s.validationFlipTitle}>
+                {v.flipSide === "home" ? "Home" : "Away"} can flip script:
+              </Text>
+              {v.flipSignals.slice(0, 2).map((sig, j) => (
+                <View key={j} style={s.identitySignal}>
+                  <View style={[s.signalDot, { backgroundColor: "#f87171" }]} />
+                  <Text style={s.identitySignalText}>{sig}</Text>
+                </View>
+              ))}
+            </View>
+          )}
+        </View>
+      ))}
+    </View>
+  );
+}
+
+// ── Butterfly Effect Card ────────────────────────────────────────────────────
+function ButterflyCard({ bf }: { bf: ButterflyEffectData }) {
+  const [expandedSec, setExpandedSec] = useState<string | null>(null);
+
+  const riskColor = (l: string) =>
+    l === "High" ? "#f87171" : l === "Medium" ? "#f59e0b" : "#4ade80";
+
+  const sections = [
+    {
+      id: "upset",
+      title: "Upset Potential",
+      subtitle: "Can underdog win or steal draw?",
+      value: bf.upsetPotential,
+      label: bf.upsetLabel,
+      signals: bf.upsetSignals,
+      icon: "flash-outline" as const,
+    },
+    {
+      id: "inflation",
+      title: "Goal Inflation Risk",
+      subtitle: "Low-scoring match goes high?",
+      value: bf.goalInflationRisk,
+      label: bf.goalInflationLabel,
+      signals: bf.goalInflationSignals,
+      icon: "trending-up-outline" as const,
+    },
+    {
+      id: "btts",
+      title: "BTTS Flip Risk",
+      subtitle: "Non-BTTS match becomes BTTS?",
+      value: bf.bttsFlipRisk,
+      label: bf.bttsFlipLabel,
+      signals: bf.bttsFlipSignals,
+      icon: "swap-horizontal-outline" as const,
+    },
+  ];
+
+  return (
+    <View style={[s.card, { borderColor: bf.chaosColor + "33" }]}>
+      <StageHeader stage="Butterfly" title="Butterfly Effect" badge={bf.chaosLabel} badgeColor={bf.chaosColor} />
+      <Text style={s.validatorSubtitle}>
+        Detects non-statistical chaos — when football's low-scoring nature makes any single moment decisive.
+      </Text>
+
+      {/* Chaos index */}
+      <View style={[s.chaosIndexRow, { backgroundColor: bf.chaosColor + "15", borderColor: bf.chaosColor + "30" }]}>
+        <Text style={[s.chaosIndexVal, { color: bf.chaosColor }]}>
+          {(bf.overallChaosIndex * 100).toFixed(0)}%
+        </Text>
+        <View style={{ flex: 1 }}>
+          <AnimBar pct={bf.overallChaosIndex * 100} color={bf.chaosColor} />
+          <Text style={[s.chaosIndexLabel, { color: bf.chaosColor }]}>Overall Chaos Index — {bf.chaosLabel}</Text>
+        </View>
+      </View>
+
+      {/* Three risk sections */}
+      {sections.map((sec) => {
+        const color = riskColor(sec.label);
+        const isOpen = expandedSec === sec.id;
+        return (
+          <TouchableOpacity
+            key={sec.id}
+            style={s.butterflySec}
+            onPress={() => setExpandedSec(isOpen ? null : sec.id)}
+            activeOpacity={0.7}
+          >
+            <View style={s.butterflySecHeader}>
+              <Ionicons name={sec.icon} size={14} color={color} />
+              <View style={{ flex: 1 }}>
+                <Text style={s.butterflySecTitle}>{sec.title}</Text>
+                <Text style={s.butterflySecSub}>{sec.subtitle}</Text>
+              </View>
+              <View style={[s.butterflyBadge, { backgroundColor: color + "22" }]}>
+                <Text style={[s.butterflyBadgeText, { color }]}>{sec.label}</Text>
+              </View>
+              <Text style={[s.butterflyStat, { color }]}>{(sec.value * 100).toFixed(0)}%</Text>
+              <Ionicons name={isOpen ? "chevron-up" : "chevron-down"} size={12} color={Colors.dark.textTertiary} />
+            </View>
+            <AnimBar pct={sec.value * 100} color={color} />
+            {isOpen && sec.signals.length > 0 && (
+              <View style={s.butterflySignals}>
+                {sec.signals.map((sig, i) => (
+                  <View key={i} style={s.identitySignal}>
+                    <View style={[s.signalDot, { backgroundColor: color }]} />
+                    <Text style={s.identitySignalText}>{sig}</Text>
+                  </View>
+                ))}
+              </View>
+            )}
+            {isOpen && sec.signals.length === 0 && (
+              <Text style={[s.identitySignalText, { marginTop: 6, paddingLeft: 10 }]}>No significant signals detected.</Text>
+            )}
+          </TouchableOpacity>
+        );
+      })}
+    </View>
+  );
+}
+
 // ── Main Component ────────────────────────────────────────────────────────────
 interface Props {
   eventId: string;
@@ -759,12 +1274,25 @@ export default function HierarchicalPredictionTab({
         </View>
       )}
 
-      {/* Markets */}
-      <MarketsCard
-        markets={data.markets}
-        homeTeamName={homeTeamName}
-        awayTeamName={awayTeamName}
-      />
+      {/* Extended Bet List (primary smart markets) */}
+      {data.extendedMarkets ? (
+        <BetListCard
+          em={data.extendedMarkets}
+          homeTeamName={homeTeamName}
+          awayTeamName={awayTeamName}
+        />
+      ) : (
+        <MarketsCard
+          markets={data.markets}
+          homeTeamName={homeTeamName}
+          awayTeamName={awayTeamName}
+        />
+      )}
+
+      {/* Butterfly Effect */}
+      {data.butterflyEffect && (
+        <ButterflyCard bf={data.butterflyEffect} />
+      )}
 
       {/* Stage 1 */}
       <CompletenessCard data={data.stage1_completeness} />
@@ -801,12 +1329,26 @@ export default function HierarchicalPredictionTab({
         ))}
       </View>
 
+      {/* Score Validation */}
+      {data.scoreValidations && data.scoreValidations.length > 0 && (
+        <ScoreValidationCard validations={data.scoreValidations} />
+      )}
+
+      {/* Behavioral Panel */}
+      {data.behavioral && (
+        <BehavioralPanel
+          beh={data.behavioral}
+          homeTeamName={homeTeamName}
+          awayTeamName={awayTeamName}
+        />
+      )}
+
       {/* Footer */}
       <View style={s.footer}>
         <Ionicons name="information-circle-outline" size={13} color={Colors.dark.textTertiary} />
         <Text style={s.footerText}>
-          6-stage engine: Completeness → Identity → Bucket Family → Outlier → Psychology → Final Rank.
-          Confidence adjusted for data quality, family alignment, contradictions, and contextual psychology.
+          Engine: Completeness → Identity → Bucket Family → Outlier → Psychology → Score Rank → Behavioral Intelligence → Score Validator → Butterfly Effect.
+          Every prediction verified for achievability before delivery.
         </Text>
       </View>
     </ScrollView>
@@ -977,4 +1519,91 @@ const s = StyleSheet.create({
   // Footer
   footer: { flexDirection: "row", gap: 6, alignItems: "flex-start", paddingTop: 4 },
   footerText: { fontSize: 11, fontFamily: "Inter_400Regular", color: Colors.dark.textTertiary, flex: 1, lineHeight: 16 },
+
+  // ── Bet List Card ───────────────────────────────────────────────────────────
+  betGroupLabel: { fontSize: 11, fontFamily: "Inter_700Bold", color: Colors.dark.textSecondary, textTransform: "uppercase", letterSpacing: 0.8, marginTop: 12, marginBottom: 6 },
+  betRow3: { flexDirection: "row", gap: 6, marginBottom: 2 },
+  betRow2: { flexDirection: "row", gap: 8, marginBottom: 2 },
+  betCell3: { flex: 1, backgroundColor: Colors.dark.background, borderRadius: 10, padding: 10, alignItems: "center", borderWidth: StyleSheet.hairlineWidth, borderColor: Colors.dark.border },
+  betCell2: { flex: 1, backgroundColor: Colors.dark.background, borderRadius: 10, padding: 12, alignItems: "center", borderWidth: StyleSheet.hairlineWidth, borderColor: Colors.dark.border },
+  betCellLabel: { fontSize: 10, fontFamily: "Inter_400Regular", color: Colors.dark.textSecondary, marginBottom: 3, textAlign: "center" },
+  betCellPred: { fontSize: 15, fontFamily: "Inter_700Bold", marginBottom: 2 },
+  betCellProb: { fontSize: 11, fontFamily: "Inter_600SemiBold" },
+
+  firstScoreRow: { flexDirection: "row", alignItems: "center", backgroundColor: Colors.dark.background, borderRadius: 12, overflow: "hidden", borderWidth: StyleSheet.hairlineWidth, borderColor: Colors.dark.border },
+  firstScoreItem: { flex: 1, alignItems: "center", paddingVertical: 14, gap: 3 },
+  firstScoreDivider: { width: StyleSheet.hairlineWidth, height: "70%", backgroundColor: Colors.dark.border },
+  firstScoreTeam: { fontSize: 10, fontFamily: "Inter_400Regular", color: Colors.dark.textSecondary, textAlign: "center" },
+  firstScoreProb: { fontSize: 20, fontFamily: "Inter_700Bold" },
+  firstScorePredBadge: { backgroundColor: "#4ade8022", borderRadius: 6, paddingHorizontal: 6, paddingVertical: 2 },
+  firstScorePredText: { fontSize: 9, fontFamily: "Inter_700Bold", color: "#4ade80" },
+
+  drawIntelBox: { marginTop: 12, borderRadius: 10, borderWidth: 1, padding: 12 },
+  drawIntelHeader: { flexDirection: "row", alignItems: "center", gap: 6, marginBottom: 8 },
+  drawIntelTitle: { fontSize: 13, fontFamily: "Inter_600SemiBold", color: Colors.dark.text, flex: 1 },
+  drawIntelBadge: { borderRadius: 8, paddingHorizontal: 8, paddingVertical: 3 },
+  drawIntelBadgeText: { fontSize: 10, fontFamily: "Inter_700Bold" },
+  drawIntelMetrics: { flexDirection: "row", gap: 10, marginBottom: 8 },
+  drawIntelMetric: { alignItems: "center", backgroundColor: Colors.dark.background, borderRadius: 8, padding: 8, flex: 1 },
+  drawIntelMetricVal: { fontSize: 18, fontFamily: "Inter_700Bold" },
+  drawIntelMetricLbl: { fontSize: 10, fontFamily: "Inter_400Regular", color: Colors.dark.textSecondary, marginTop: 2 },
+
+  // ── Behavioral Panel ────────────────────────────────────────────────────────
+  behavioralSubtitle: { fontSize: 11, fontFamily: "Inter_400Regular", color: Colors.dark.textSecondary, lineHeight: 16, marginBottom: 14 },
+  behavioralSummaryRow: { flexDirection: "row", gap: 8, marginBottom: 12 },
+  behavioralSummaryItem: { flex: 1, alignItems: "center", backgroundColor: Colors.dark.background, borderRadius: 10, padding: 10, borderWidth: 1 },
+  behavioralSummaryVal: { fontSize: 13, fontFamily: "Inter_700Bold", textAlign: "center" },
+  behavioralSummaryLbl: { fontSize: 10, fontFamily: "Inter_400Regular", color: Colors.dark.textSecondary, marginTop: 2 },
+  behavioralSummaryConf: { fontSize: 11, fontFamily: "Inter_600SemiBold", marginTop: 2 },
+  drawClassifierRow: { flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: Colors.dark.background, borderRadius: 8, padding: 10, marginBottom: 10, flexWrap: "wrap" },
+  drawClassifierLabel: { fontSize: 11, fontFamily: "Inter_600SemiBold", color: Colors.dark.textSecondary },
+  drawClassifierVal: { fontSize: 12, fontFamily: "Inter_700Bold", flex: 1 },
+  drawClassifierBadge: { borderRadius: 8, paddingHorizontal: 8, paddingVertical: 3 },
+  drawClassifierBadgeText: { fontSize: 10, fontFamily: "Inter_700Bold" },
+  behavioralTempoRow: { flexDirection: "row", alignItems: "center", gap: 6, marginBottom: 8 },
+  behavioralTempoLabel: { fontSize: 11, fontFamily: "Inter_400Regular", color: Colors.dark.textSecondary },
+  behavioralTempoVal: { fontSize: 12, fontFamily: "Inter_700Bold" },
+  behavioralFamilyRow: { flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 10 },
+  behavioralFamilyDot: { width: 10, height: 10, borderRadius: 5 },
+  behavioralFamilyLabel: { fontSize: 13, fontFamily: "Inter_700Bold" },
+  behavioralFamilyConf: { fontSize: 11, fontFamily: "Inter_400Regular", color: Colors.dark.textSecondary },
+  behavioralExpandBtn: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingTop: 10, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: Colors.dark.border },
+  behavioralExpandText: { fontSize: 12, fontFamily: "Inter_600SemiBold", color: "#a78bfa" },
+  behavioralExactList: { marginTop: 10, gap: 4 },
+  behavioralExactRow: { flexDirection: "row", alignItems: "center", gap: 8, backgroundColor: Colors.dark.background, borderRadius: 8, padding: 8 },
+  behavioralExactRank: { fontSize: 11, fontFamily: "Inter_400Regular", color: Colors.dark.textTertiary, width: 22 },
+  behavioralExactScore: { fontSize: 16, fontFamily: "Inter_700Bold", color: Colors.dark.text, width: 42 },
+  behavioralExactOutcome: { fontSize: 11, fontFamily: "Inter_600SemiBold", flex: 1 },
+  behavioralExactConf: { fontSize: 13, fontFamily: "Inter_700Bold" },
+  behavioralContraRow: { flexDirection: "row", alignItems: "flex-start", gap: 6, marginTop: 8, backgroundColor: "#f59e0b11", borderRadius: 8, padding: 8 },
+  behavioralContraText: { fontSize: 11, fontFamily: "Inter_400Regular", color: "#f59e0b", flex: 1, lineHeight: 16 },
+
+  // ── Score Validation Card ───────────────────────────────────────────────────
+  validatorSubtitle: { fontSize: 11, fontFamily: "Inter_400Regular", color: Colors.dark.textSecondary, lineHeight: 16, marginBottom: 12 },
+  validationItem: { borderRadius: 10, borderWidth: 1, padding: 12, marginBottom: 10, borderColor: Colors.dark.border },
+  validationHeader: { flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 10, flexWrap: "wrap" },
+  validationScore: { fontSize: 20, fontFamily: "Inter_700Bold", color: Colors.dark.text, width: 44 },
+  validationLabelBadge: { borderRadius: 8, paddingHorizontal: 8, paddingVertical: 3 },
+  validationLabelText: { fontSize: 11, fontFamily: "Inter_700Bold" },
+  validationAch: { fontSize: 12, fontFamily: "Inter_600SemiBold", marginLeft: "auto" },
+  validationExpRow: { flexDirection: "row", gap: 8, marginBottom: 8 },
+  validationExpItem: { flex: 1, alignItems: "center", backgroundColor: Colors.dark.background, borderRadius: 8, padding: 8 },
+  validationExpLbl: { fontSize: 10, fontFamily: "Inter_400Regular", color: Colors.dark.textSecondary, marginBottom: 2 },
+  validationExpVal: { fontSize: 14, fontFamily: "Inter_700Bold", color: Colors.dark.text },
+  validationRisks: { gap: 3, marginBottom: 6 },
+  validationFlipBox: { backgroundColor: "#f8717111", borderRadius: 8, padding: 8, marginTop: 4, gap: 3 },
+  validationFlipTitle: { fontSize: 11, fontFamily: "Inter_700Bold", color: "#f87171", marginBottom: 4 },
+
+  // ── Butterfly Effect Card ───────────────────────────────────────────────────
+  chaosIndexRow: { flexDirection: "row", alignItems: "center", gap: 12, borderRadius: 10, borderWidth: 1, padding: 12, marginBottom: 14 },
+  chaosIndexVal: { fontSize: 28, fontFamily: "Inter_700Bold" },
+  chaosIndexLabel: { fontSize: 10, fontFamily: "Inter_600SemiBold", marginTop: 4 },
+  butterflySec: { paddingVertical: 10, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: Colors.dark.border, gap: 6 },
+  butterflySecHeader: { flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 4 },
+  butterflySecTitle: { fontSize: 13, fontFamily: "Inter_700Bold", color: Colors.dark.text },
+  butterflySecSub: { fontSize: 10, fontFamily: "Inter_400Regular", color: Colors.dark.textSecondary },
+  butterflyBadge: { borderRadius: 8, paddingHorizontal: 8, paddingVertical: 3 },
+  butterflyBadgeText: { fontSize: 10, fontFamily: "Inter_700Bold" },
+  butterflyStat: { fontSize: 15, fontFamily: "Inter_700Bold", minWidth: 38, textAlign: "right" },
+  butterflySignals: { gap: 3, paddingTop: 4 },
 });

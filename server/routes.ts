@@ -28,6 +28,7 @@ import { scrapeGeonodeProxies } from "./proxyScraper";
 import { torFetch, getTorStatus, rotateTorCircuit } from "./torFetch";
 import { ensureTor } from "./torManager";
 import { runHierarchicalPrediction } from "./hierarchicalPredictor";
+import { validatePredictedScore, computeButterflyEffect, buildExtendedMarkets } from "./predictionValidators";
 import {
   trainBehavioralModels,
   loadBehavioralModels,
@@ -6792,7 +6793,28 @@ Format with clear markdown headings (### for sections). Keep it punchy but thoro
         dataSource,
       });
 
-      res.json(result);
+      // ── Behavioral Prediction ──────────────────────────────────────────
+      let behavioral = null;
+      try {
+        const bModels = loadBehavioralModels();
+        behavioral = predictBehavioral(row, bModels);
+      } catch { /* behavioral unavailable — not blocking */ }
+
+      // ── Score Validation (top 3 scorelines) ───────────────────────────
+      const scoreValidations = (result.top5 ?? []).slice(0, 3).map((pred: any) =>
+        validatePredictedScore(row, pred.homeGoals, pred.awayGoals)
+      );
+
+      // ── Butterfly Effect ───────────────────────────────────────────────
+      const butterflyEffect = computeButterflyEffect(row);
+
+      // ── Extended Markets ───────────────────────────────────────────────
+      const drawModelScore = behavioral?.drawClassifier?.available
+        ? (behavioral.drawClassifier.drawProbability / 100)
+        : undefined;
+      const extendedMarkets = buildExtendedMarkets(row, homeWinProb, drawProb, awayWinProb, drawModelScore);
+
+      res.json({ ...result, behavioral, scoreValidations, butterflyEffect, extendedMarkets });
     } catch (err: any) {
       console.error("[hierarchical-prediction] error:", err.message);
       res.status(500).json({ error: err.message || "Hierarchical prediction failed" });
